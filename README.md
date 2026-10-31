@@ -1,89 +1,80 @@
-# Maison Aara — Live Exact-Garment Trial Room
+# Maison Aara — Automatic Saree Trial Room
 
-React + Vite prototype for a deterministic online garment fitting room with a **live tracking layer**.
+React + Vite prototype for an online saree fitting room with **automatic on-device body tracking**.
 
-## Core idea
+## Customer experience
 
-The customer provides only the size they normally buy: **XS / S / M / L / XL**.
+The customer does not mark body points and does not enter body measurements.
 
-There is no chest/waist/hip measurement form in the trial room.
+1. choose a saree
+2. choose the blouse size normally purchased: XS / S / M / L / XL
+3. start the live camera, or upload a photo
+4. the browser automatically detects shoulders, hips, knees and ankles
+5. the renderer fits blouse, wrapped saree, pleats and pallu to the detected body
+6. if the person moves out of frame, tracking searches and locks again automatically
 
-The live mode works like this:
-
-1. choose the product and size
-2. open the real customer camera
-3. load the exact transparent SKU garment PNG/WebP
-4. tap four torso points once: left/right shoulder and left/right hip
-5. detect many visual features inside the torso region
-6. track that feature cloud frame-to-frame with classic Lucas–Kanade optical flow
-7. estimate one stable torso transform
-8. continuously move/re-scale/re-warp the complete real garment asset with that transform
-
-This is more stable than tracking every garment anchor independently because one bad point cannot pull a sleeve or hem away from the rest of the garment.
+A MacBook user can stand farther away to show the whole body. A closer phone/selfie view becomes an upper-body blouse + pallu preview instead of failing completely.
 
 ## Included
 
-- Premium boutique storefront
-- Exact T-shirt demo using a transparent real garment PNG
-- Boutique examples for saree, one-piece, gown and kurti
-- Live camera trial room
-- Four-point live torso calibration
-- Multi-feature OpenCV optical-flow tracking
-- Full-body photo fitting fallback
-- Exact garment PNG/WebP upload
-- Multi-band image mesh warping
-- Exact logo / print / embroidery / neckline / sleeve pixels preserved from the garment asset
-- XS / S / M / L / XL selector
-- Selected size passed directly from product page into the live trial room
-- Size changes update the garment layer without re-calibrating
-- Responsive fitting-room UI
+- Saree-only boutique catalog
+- Live camera try-on
+- Photo upload fallback
+- No manual calibration points
+- MediaPipe Pose Landmarker running on-device
+- GPU setup with CPU fallback
+- CDN/WASM fallback and hard loading timeouts
+- Camera-start timeout and visible retry state instead of an endless loader
+- Automatic tracking recovery after temporary loss
+- Framing guidance: center yourself, move closer/back, face the camera
+- Full-body mode when legs/ankles are visible
+- Upper-body selfie mode when only torso landmarks are available
+- Smoothing to reduce landmark jitter
+- Saree-specific rendering:
+  - blouse
+  - lower wrapped drape
+  - center pleats
+  - shoulder pallu
+  - borders
+- Real photographic saree pixels used as the fabric texture
+- Optional multi-class skin segmentation for better hand/arm occlusion
+- Pose-based arm occlusion fallback if segmentation is slow or unavailable
+- Blouse size selector XS / S / M / L / XL
+- Live switching between sarees while keeping the fitting room open
 
-## Why four calibration points?
+## Why automatic tracking now?
 
-The project intentionally avoids a pose/body ML model. The customer marks four stable torso references once. OpenCV then finds many natural visual features around that torso region and tracks them together.
+A consumer fitting room should not ask shoppers to identify technical body landmarks. The current version uses MediaPipe Pose Landmarker to reacquire the body on every frame, so there is no calibration step to lose or repeat.
 
-The garment follows the **estimated torso motion**, rather than following four or eight independently drifting points.
+The fitting room does not use a generative image model. It uses computer vision for body landmarks/segmentation and deterministic canvas rendering for the saree.
 
-## Live tracking behavior
+## Reliability / anti-stuck behavior
 
-The tracker uses sparse Lucas–Kanade pyramidal optical flow (`calcOpticalFlowPyrLK`). It rejects feature points whose motion disagrees strongly with the majority, estimates translation/scale/rotation from the remaining points, smooths that transform, and periodically re-seeds visual features.
+The app deliberately avoids indefinite loading states:
 
-The calibration click mapping also accounts for the camera's `object-fit: contain` letterboxing and mirrored preview so the garment anchors line up with where the customer actually tapped.
+- primary MediaPipe WASM CDN + fallback CDN
+- GPU initialization + CPU fallback
+- tracker setup has a hard timeout
+- image/fabric loading has a hard timeout
+- camera permission/start has a hard timeout
+- secondary skin segmentation never blocks the main fitting room
+- if segmentation fails, pose-based arm occlusion remains active
+- if body tracking is lost, the UI returns to searching and automatically re-locks when the person is visible again
+- a Retry Tracker button is shown if the engine cannot initialize
 
-If the user turns too far, leaves frame, or too many visual features are lost, the UI pauses tracking and asks for recalibration instead of letting the garment drift across the screen.
+## Framing modes
 
-## Size behavior
+### Full saree
+Best for a laptop/MacBook camera when the customer stands far enough back to show shoulders, hips, knees and ankles.
 
-The live body calibration stays fixed to the customer.
-
-Changing size changes the garment width around that same torso calibration:
-
-- XS — narrower visual fit
-- S — slightly narrower
-- M — baseline
-- L — slightly wider
-- XL — wider
-
-This is a visual size comparison, not a physical cloth-simulation measurement system.
-
-## Catalog asset requirements
-
-Every production SKU should ideally include:
-
-1. normal ecommerce product photo
-2. transparent front-facing PNG/WebP of the exact garment
-3. product type (`top` or `full`)
-4. available sizes
-
-A T-shirt asset should contain the exact T-shirt shape, sleeves, neck, logo and print. The renderer deforms those pixels rather than drawing a replacement shirt.
-
-For sarees or layered outfits, production should use separate transparent assets/meshes for blouse, main drape, pallu and optional lower layers so those layers can be warped independently.
+### Selfie / upper-body
+If only the torso is visible, the experience continues with blouse and pallu placement rather than showing an error. The UI labels this as an upper-body preview.
 
 ## Fit accuracy
 
-The live result is a deterministic 2D tracked preview. It is useful for appearance, product comparison and approximate visual size differences, but it is **not physical cloth simulation**. It cannot calculate real fabric tension, stretch, gravity-driven folds or hidden body depth from a normal RGB camera.
+This is a live visual try-on, not physical cloth simulation. A normal RGB camera cannot determine true fabric tension, hidden body depth, real folds or tailoring fit with the accuracy of a physical trial room.
 
-For physically accurate fitting without generative AI, the next step is a true 3D apparel pipeline using real garment patterns/meshes and cloth simulation.
+For physically accurate non-generative fit, the later production path is 3D body/depth capture + actual garment patterns/meshes + cloth simulation. The React shopping/trial-room UX can remain the same.
 
 ## Run
 
@@ -92,7 +83,7 @@ npm install
 npm run dev
 ```
 
-Camera access works on `localhost`. A deployed site must use HTTPS for browser camera permissions.
+Camera access works on `localhost`. Production deployments must use HTTPS for browser camera permissions.
 
 ## Build
 
@@ -101,10 +92,6 @@ npm run build
 npm run preview
 ```
 
-## External runtime
+## Demo assets
 
-Live tracking dynamically loads OpenCV.js from the official OpenCV documentation host. No API key is required.
-
-## Demo asset attribution
-
-The included exact T-shirt demo uses `Wikipedia 25 Tshirt white (front).png` from Wikimedia Commons, licensed CC BY-SA 4.0.
+The prototype catalog uses openly licensed saree photographs from Wikimedia Commons as visual/fabric references. Replace these URLs with your boutique's actual product photography and fabric/detail crops for production.
