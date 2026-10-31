@@ -1,4 +1,4 @@
-export const CALIBRATION_STEPS = [
+export const PHOTO_CALIBRATION_STEPS = [
   ['leftShoulder', 'Left shoulder edge'],
   ['rightShoulder', 'Right shoulder edge'],
   ['leftWaist', 'Left waist edge'],
@@ -9,7 +9,103 @@ export const CALIBRATION_STEPS = [
   ['rightHem', 'Right garment hem'],
 ].map(([key, label]) => ({ key, label }));
 
+const LIVE_TOP_STEPS = [
+  ['leftShoulder', 'Left shoulder edge'],
+  ['rightShoulder', 'Right shoulder edge'],
+  ['leftHip', 'Left hip edge'],
+  ['rightHip', 'Right hip edge'],
+].map(([key, label]) => ({ key, label }));
+
+const LIVE_FULL_STEPS = [
+  ...LIVE_TOP_STEPS.map(({ key, label }) => [key, label]),
+  ['leftHem', 'Left garment hem'],
+  ['rightHem', 'Right garment hem'],
+].map(([key, label]) => ({ key, label }));
+
+export const CALIBRATION_STEPS = PHOTO_CALIBRATION_STEPS;
+
+export function getLiveCalibrationSteps(garmentType = 'top') {
+  return garmentType === 'top' ? LIVE_TOP_STEPS : LIVE_FULL_STEPS;
+}
+
+const SIZE_SCALE = {
+  XS: 0.92,
+  S: 0.96,
+  M: 1,
+  L: 1.05,
+  XL: 1.10,
+};
+
 const toPoint = (anchor, width, height) => ({ x: anchor.x * width, y: anchor.y * height });
+
+function midpoint(a, b, t = 0.5) {
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+  };
+}
+
+function completeAnchors(anchors, garmentType = 'top') {
+  if (!anchors?.leftShoulder || !anchors?.rightShoulder || !anchors?.leftHip || !anchors?.rightHip) {
+    return anchors || {};
+  }
+
+  const result = { ...anchors };
+  result.leftWaist ||= midpoint(result.leftShoulder, result.leftHip, 0.62);
+  result.rightWaist ||= midpoint(result.rightShoulder, result.rightHip, 0.62);
+
+  if (garmentType !== 'top' && (!result.leftHem || !result.rightHem)) {
+    const leftTorso = {
+      x: result.leftHip.x - result.leftShoulder.x,
+      y: result.leftHip.y - result.leftShoulder.y,
+    };
+    const rightTorso = {
+      x: result.rightHip.x - result.rightShoulder.x,
+      y: result.rightHip.y - result.rightShoulder.y,
+    };
+    result.leftHem ||= {
+      x: result.leftHip.x + leftTorso.x * 0.14,
+      y: Math.min(0.98, result.leftHip.y + Math.abs(leftTorso.y) * 1.65),
+    };
+    result.rightHem ||= {
+      x: result.rightHip.x + rightTorso.x * 0.14,
+      y: Math.min(0.98, result.rightHip.y + Math.abs(rightTorso.y) * 1.65),
+    };
+  }
+
+  return result;
+}
+
+function scalePair(left, right, scale) {
+  const centerX = (left.x + right.x) / 2;
+  return [
+    { ...left, x: centerX + (left.x - centerX) * scale },
+    { ...right, x: centerX + (right.x - centerX) * scale },
+  ];
+}
+
+function sizedAnchors(anchors, garmentType, size) {
+  const completed = completeAnchors(anchors, garmentType);
+  const scale = SIZE_SCALE[size] || 1;
+  if (scale === 1) return completed;
+
+  const result = { ...completed };
+  const pairs = [
+    ['leftShoulder', 'rightShoulder'],
+    ['leftWaist', 'rightWaist'],
+    ['leftHip', 'rightHip'],
+    ['leftHem', 'rightHem'],
+  ];
+
+  pairs.forEach(([leftKey, rightKey]) => {
+    if (!result[leftKey] || !result[rightKey]) return;
+    const [left, right] = scalePair(result[leftKey], result[rightKey], scale);
+    result[leftKey] = left;
+    result[rightKey] = right;
+  });
+
+  return result;
+}
 
 function affine(source, target) {
   const [s0, s1, s2] = source;
@@ -25,7 +121,7 @@ function affine(source, target) {
     d2.x * (s0.x * s1.y - s1.x * s0.y)
   ) / den;
 
-  const b = (d0.y * (s1.y - s2.y) + d1.y * (s2.y - s0.y) + d2.y * (s0.y - s1.y)) / den;
+  const b = (d0.y * (s1.y - s2.y) + d1.y * (s2.y - s0.y) + d2.y * (s1.y - s0.y)) / den;
   const d = (d0.y * (s2.x - s1.x) + d1.y * (s0.x - s2.x) + d2.y * (s1.x - s0.x)) / den;
   const f = (
     d0.y * (s1.x * s2.y - s2.x * s1.y) +
@@ -113,14 +209,15 @@ export function detectVisibleBounds(image) {
   }
 }
 
-export function drawExactGarment(ctx, garment, bounds, anchors, garmentType = 'full') {
+export function drawExactGarment(ctx, garment, bounds, anchors, garmentType = 'full', size = 'M') {
   if (!garment || !bounds || !anchors) return;
+  const normalized = sizedAnchors(anchors, garmentType, size);
   const required = ['leftShoulder', 'rightShoulder', 'leftWaist', 'rightWaist', 'leftHip', 'rightHip'];
-  if (required.some((key) => !anchors[key])) return;
+  if (required.some((key) => !normalized[key])) return;
 
   const w = ctx.canvas.width;
   const h = ctx.canvas.height;
-  const point = (key) => toPoint(anchors[key], w, h);
+  const point = (key) => toPoint(normalized[key], w, h);
 
   const shoulderL = point('leftShoulder');
   const shoulderR = point('rightShoulder');
@@ -128,8 +225,8 @@ export function drawExactGarment(ctx, garment, bounds, anchors, garmentType = 'f
   const waistR = point('rightWaist');
   const hipL = point('leftHip');
   const hipR = point('rightHip');
-  const hemL = anchors.leftHem ? point('leftHem') : hipL;
-  const hemR = anchors.rightHem ? point('rightHem') : hipR;
+  const hemL = normalized.leftHem ? point('leftHem') : hipL;
+  const hemR = normalized.rightHem ? point('rightHem') : hipR;
 
   const x0 = bounds.x;
   const x1 = bounds.x + bounds.width;
@@ -150,29 +247,44 @@ export function drawExactGarment(ctx, garment, bounds, anchors, garmentType = 'f
   drawBand(ctx, garment, { x0, y0: yHip, x1, y1: bottom }, [hipL, hipR, hemR, hemL]);
 }
 
-function drawCalibration(ctx, anchors, activeStep = 0) {
+function drawCalibration(ctx, anchors, steps, activeStep = 0) {
   const width = ctx.canvas.width;
   const height = ctx.canvas.height;
   ctx.save();
   ctx.lineWidth = Math.max(2, width * .002);
-  CALIBRATION_STEPS.forEach((step, index) => {
+  steps.forEach((step, index) => {
     const anchor = anchors?.[step.key];
     if (!anchor) return;
     const x = anchor.x * width;
     const y = anchor.y * height;
-    const size = Math.max(8, width * .009);
+    const marker = Math.max(8, width * .009);
     ctx.strokeStyle = index === activeStep ? '#ffcf70' : '#ffffff';
     ctx.beginPath();
-    ctx.moveTo(x - size, y);
-    ctx.lineTo(x + size, y);
-    ctx.moveTo(x, y - size);
-    ctx.lineTo(x, y + size);
+    ctx.arc(x, y, marker * 0.8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x - marker, y);
+    ctx.lineTo(x + marker, y);
+    ctx.moveTo(x, y - marker);
+    ctx.lineTo(x, y + marker);
     ctx.stroke();
   });
   ctx.restore();
 }
 
-export function renderGarmentOverlay({ canvas, garment, bounds, anchors, garmentType, width, height, showCalibration = false, activeStep = 0 }) {
+export function renderGarmentOverlay({
+  canvas,
+  garment,
+  bounds,
+  anchors,
+  garmentType,
+  size = 'M',
+  width,
+  height,
+  showCalibration = false,
+  activeStep = 0,
+  calibrationSteps,
+}) {
   if (!canvas || !width || !height) return;
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
@@ -180,11 +292,26 @@ export function renderGarmentOverlay({ canvas, garment, bounds, anchors, garment
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  if (garment && bounds && anchors) drawExactGarment(ctx, garment, bounds, anchors, garmentType);
-  if (showCalibration) drawCalibration(ctx, anchors, activeStep);
+  if (garment && bounds && anchors) {
+    drawExactGarment(ctx, garment, bounds, anchors, garmentType, size);
+  }
+
+  if (showCalibration) {
+    drawCalibration(ctx, anchors, calibrationSteps || getLiveCalibrationSteps(garmentType), activeStep);
+  }
 }
 
-export function renderTryOn({ canvas, person, garment, bounds, anchors, garmentType, showCalibration = false, activeStep = 0 }) {
+export function renderTryOn({
+  canvas,
+  person,
+  garment,
+  bounds,
+  anchors,
+  garmentType,
+  size = 'M',
+  showCalibration = false,
+  activeStep = 0,
+}) {
   if (!canvas || !person) return;
   const ctx = canvas.getContext('2d');
   const width = person.naturalWidth || person.width;
@@ -197,6 +324,11 @@ export function renderTryOn({ canvas, person, garment, bounds, anchors, garmentT
   ctx.clearRect(0, 0, width, height);
   ctx.drawImage(person, 0, 0, width, height);
 
-  if (garment && bounds && anchors) drawExactGarment(ctx, garment, bounds, anchors, garmentType);
-  if (showCalibration) drawCalibration(ctx, anchors, activeStep);
+  if (garment && bounds && anchors) {
+    drawExactGarment(ctx, garment, bounds, anchors, garmentType, size);
+  }
+
+  if (showCalibration) {
+    drawCalibration(ctx, anchors, PHOTO_CALIBRATION_STEPS, activeStep);
+  }
 }
