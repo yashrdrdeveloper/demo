@@ -1,7 +1,0 @@
-.realistic-viewer{position:relative;background:radial-gradient(circle at 50% 28%,#f8f3ec 0,#ebe5dc 48%,#ddd5ca 100%)}
-.realistic-viewer canvas{cursor:grab}.realistic-viewer canvas:active{cursor:grabbing}
-.model-badge{position:absolute;top:18px;left:18px;display:flex;align-items:center;gap:7px;padding:8px 10px;background:#fffaf3d9;border:1px solid #ffffffb0;backdrop-filter:blur(14px);box-shadow:0 8px 30px #30231a12;font-size:8px;letter-spacing:.14em;font-weight:800;color:#3a302a;pointer-events:none}
-.model-badge>span{width:6px;height:6px;border-radius:50%;background:#5f7e5f;box-shadow:0 0 0 4px #5f7e5f18}.model-badge small{font-size:7px;letter-spacing:.08em;color:#8b8178;font-weight:600;margin-left:2px}
-.real-model-loader{min-width:190px;padding:13px 16px;background:#fffaf2e8;border:1px solid #fff;box-shadow:0 18px 50px #2b20182b;backdrop-filter:blur(14px);display:flex;align-items:center;gap:10px;font:600 10px/1.2 'DM Sans',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#5c5149;white-space:nowrap}
-.real-model-loader span{width:16px;height:16px;border:2px solid #cbbfb4;border-top-color:#6e2636;border-radius:50%;animation:atelier-spin .8s linear infinite}@keyframes atelier-spin{to{transform:rotate(360deg)}}
-@media(max-width:760px){.model-badge{top:12px;left:12px;padding:7px 8px}.model-badge small{display:none}}
