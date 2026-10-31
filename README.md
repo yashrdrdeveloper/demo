@@ -1,6 +1,6 @@
-# Maison Aara — Automatic Saree Trial Room
+# Maison Aara — Pixel-Aware Live Saree Trial Room
 
-React + Vite prototype for an online saree fitting room with **automatic on-device body tracking**.
+React + Vite prototype for an online saree fitting room with **automatic on-device body tracking and visible-person pixel analysis**.
 
 ## Customer experience
 
@@ -9,11 +9,22 @@ The customer does not mark body points and does not enter body measurements.
 1. choose a saree
 2. choose the blouse size normally purchased: XS / S / M / L / XL
 3. start the live camera, or upload a photo
-4. the browser automatically detects shoulders, hips, knees and ankles
-5. the renderer fits blouse, wrapped saree, pleats and pallu to the detected body
-6. if the person moves out of frame, tracking searches and locks again automatically
+4. the browser automatically detects the person and body landmarks
+5. segmentation analyzes the actual visible person area in the frame
+6. the saree renderer stops at the visible body boundary instead of forcing a fixed upper/full mode
+7. front, side and back orientation are detected and stabilized over several frames
+8. if the customer leaves frame, tracking searches and automatically locks again when they return
 
-A MacBook user can stand farther away to show the whole body. A closer phone/selfie view becomes an upper-body blouse + pallu preview instead of failing completely.
+Examples:
+
+- shoulders + torso visible → blouse and upper drape only
+- hips visible → saree continues only through the visible hip area
+- knees visible → saree extends through the visible legs
+- ankles/full body visible → full saree drape
+- customer turns around → back-drape treatment
+- side turn → narrower side-drape treatment
+
+The transition is continuous. It is not a binary "half body" versus "full body" switch.
 
 ## Included
 
@@ -22,31 +33,28 @@ A MacBook user can stand farther away to show the whole body. A closer phone/sel
 - Photo upload fallback
 - No manual calibration points
 - MediaPipe Pose Landmarker running on-device
+- Person-pixel segmentation used to estimate the real visible body boundary
+- Torso-aware mask sampling so an outstretched hand does not incorrectly extend the saree length
+- Automatic front / side / back view handling
+- Orientation hysteresis to prevent front/back flicker
+- Coverage hysteresis to prevent torso/hips/legs/full labels from chattering
+- Smooth visible-bottom interpolation so the saree edge does not jump between frames
 - GPU setup with CPU fallback
 - CDN/WASM fallback and hard loading timeouts
 - Camera-start timeout and visible retry state instead of an endless loader
 - Automatic tracking recovery after temporary loss
-- Framing guidance: center yourself, move closer/back, face the camera
-- Full-body mode when legs/ankles are visible
-- Upper-body selfie mode when only torso landmarks are available
-- Smoothing to reduce landmark jitter
 - Saree-specific rendering:
   - blouse
-  - lower wrapped drape
-  - center pleats
-  - shoulder pallu
+  - wrapped lower drape
+  - center pleats for front/side views
+  - front pallu
+  - back pallu
   - borders
 - Real photographic saree pixels used as the fabric texture
 - Optional multi-class skin segmentation for better hand/arm occlusion
 - Pose-based arm occlusion fallback if segmentation is slow or unavailable
 - Blouse size selector XS / S / M / L / XL
 - Live switching between sarees while keeping the fitting room open
-
-## Why automatic tracking now?
-
-A consumer fitting room should not ask shoppers to identify technical body landmarks. The current version uses MediaPipe Pose Landmarker to reacquire the body on every frame, so there is no calibration step to lose or repeat.
-
-The fitting room does not use a generative image model. It uses computer vision for body landmarks/segmentation and deterministic canvas rendering for the saree.
 
 ## Reliability / anti-stuck behavior
 
@@ -57,18 +65,27 @@ The app deliberately avoids indefinite loading states:
 - tracker setup has a hard timeout
 - image/fabric loading has a hard timeout
 - camera permission/start has a hard timeout
-- secondary skin segmentation never blocks the main fitting room
-- if segmentation fails, pose-based arm occlusion remains active
+- secondary segmentation is throttled so it does not run on every video frame
+- segmentation never blocks the main body-tracking fallback path
+- if segmentation fails, landmark visibility and pose-based arm occlusion remain active
 - if body tracking is lost, the UI returns to searching and automatically re-locks when the person is visible again
 - a Retry Tracker button is shown if the engine cannot initialize
 
-## Framing modes
+## How visible-body fitting works
 
-### Full saree
-Best for a laptop/MacBook camera when the customer stands far enough back to show shoulders, hips, knees and ankles.
+The pose tracker supplies the main body anchors used for saree placement.
 
-### Selfie / upper-body
-If only the torso is visible, the experience continues with blouse and pallu placement rather than showing an error. The UI labels this as an upper-body preview.
+The segmentation mask supplies the visible-person pixels. The renderer samples the mask around the torso center and derives the lowest reliably visible body row. That value controls the saree's vertical render boundary.
+
+This avoids assuming that every camera frame is either "upper body" or "full body". The saree instead follows the current crop continuously.
+
+## Front / side / back handling
+
+Orientation is estimated from shoulder ordering, torso depth and face visibility. The result is stabilized over several consecutive frames before the renderer changes drape direction.
+
+- front → normal chest-crossing pallu and pleats
+- side → narrower side drape
+- back → back pallu treatment and no front pleat emphasis
 
 ## Fit accuracy
 
