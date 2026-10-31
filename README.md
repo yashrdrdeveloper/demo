@@ -4,7 +4,7 @@ A React + Vite fashion boutique prototype that brings an in-store virtual fittin
 
 ## What is included
 
-- Premium boutique storefront
+- Premium boutique storefront with real garment photography
 - Saree, one-piece dress, gown and kurti product categories
 - Virtual Try-On entry point from every product
 - Live browser camera support
@@ -16,6 +16,7 @@ A React + Vite fashion boutique prototype that brings an in-store virtual fittin
   - One-piece: continuous fitted bodice and skirt
   - Gown: floor-length flared dress
   - Kurti: straight below-knee silhouette
+- Photographic fabric textures clipped into the live garment geometry
 - Real-time garment movement as the customer changes pose
 - Foreground arm occlusion so the customer's arms stay visually in front of the garment
 - Instant product switching while the camera stays open
@@ -43,8 +44,26 @@ npm run preview
 
 The prototype uses `@mediapipe/tasks-vision` Pose Landmarker in the browser. It detects body landmarks from live camera frames or an uploaded photo, then selects a garment-specific renderer for the active product.
 
-There is no generated mannequin/avatar in the try-on flow.
+The renderer combines tracked garment geometry with photographic textile imagery, so the cloth surface uses real image pixels instead of a flat synthetic fill. There is no generated mannequin/avatar in the try-on flow.
 
 ## Production upgrade path
 
-This repository implements the online retail experience and body-tracking layer. For a production catalog, connect each SKU to prepared transparent garment assets or a dedicated photorealistic virtual-try-on model/service. The existing camera, product switching, pose tracking, size selection and fitting-room UX can stay the same.
+For your real boutique catalog, each SKU should provide:
+
+- front garment photo or transparent PNG/WebP
+- close-up fabric/embroidery texture
+- garment type (`saree`, `onepiece`, `gown`, `kurti`)
+- optional anchor/fit metadata
+
+The current browser renderer is suitable for an interactive prototype. For true photorealistic cloth deformation, folds, self-occlusion and body-shape transfer, connect the same fitting-room UI to a dedicated virtual try-on model/service and use the actual SKU garment image as its clothing input.
+
+## Demo asset attribution
+
+The repository uses external demo references only to demonstrate realistic garment photography and textile rendering. Replace these URLs with your own product assets for production.
+
+- `Silk saree 2.jpg` — Seratobikiba, Wikimedia Commons, CC BY-SA 4.0
+- `Indian traditional lady wearing saree.jpg` — Swapppp57, Wikimedia Commons, CC BY-SA 4.0
+- `Red-Dress.jpg` — Vanessa Teves, Wikimedia Commons, CC0
+- `Gfp-red-fabric-texture.jpg` — Yinan Chen / Good Free Photos, public domain dedication
+- `Red dress, Jewels exhibition, Hermitage Amsterdam.jpg` — Wikimedia Commons, CC0/PD artwork photograph metadata on source page
+- `Indian woman wearing a kurti.jpg` — NabeelJV, Wikimedia Commons, CC BY-SA 4.0
