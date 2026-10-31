@@ -2,7 +2,7 @@ import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { Camera, ImagePlus, LoaderCircle, RefreshCcw, ScanLine, ShieldCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { drawTryOn } from './TryOnRenderer';
+import { drawTryOn, preloadGarmentTexture } from './TryOnRenderer';
 
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
@@ -86,10 +86,20 @@ export default function VirtualTryOnStage({ product }) {
   }, []);
 
   useEffect(() => {
+    let active = true;
     productRef.current = product;
+
     if (landmarksRef.current && canvasRef.current) {
       drawTryOn(canvasRef.current, landmarksRef.current, product);
     }
+
+    preloadGarmentTexture(product).then(() => {
+      if (active && landmarksRef.current && canvasRef.current) {
+        drawTryOn(canvasRef.current, landmarksRef.current, productRef.current);
+      }
+    });
+
+    return () => { active = false; };
   }, [product]);
 
   useEffect(() => {
@@ -147,7 +157,7 @@ export default function VirtualTryOnStage({ product }) {
           const legsVisible = [25, 26, 27, 28].every((index) => (landmarks[index]?.visibility ?? 1) > .35);
           updateStatus(
             upperVisible && legsVisible
-              ? `${productRef.current.type} fitted — move naturally`
+              ? `${productRef.current.type} fitted — photographic fabric active`
               : 'Step back until shoulders, hips and feet are visible',
           );
         } else {
@@ -215,6 +225,7 @@ export default function VirtualTryOnStage({ product }) {
     if (!image || !canvas || !pose || !image.naturalWidth) return;
 
     try {
+      await preloadGarmentTexture(productRef.current);
       await pose.setOptions({ runningMode: 'IMAGE' });
       sizeCanvas(image.naturalWidth, image.naturalHeight);
       const result = pose.detect(image);
@@ -253,7 +264,7 @@ export default function VirtualTryOnStage({ product }) {
         <div className="tryon-orbit"><ScanLine size={34}/></div>
         <span className="eyebrow">ONLINE MAGIC MIRROR</span>
         <h2>Try the real style <em>on you.</em></h2>
-        <p>Choose a saree, one-piece, gown or kurti. Your camera tracks your body and fits that garment type directly over you.</p>
+        <p>Choose a saree, one-piece, gown or kurti. Your camera tracks your body and fits that garment type using real photographic textile detail.</p>
         <div className="tryon-start-actions">
           <button className="btn dark" disabled={!ready} onClick={startCamera}>
             {!ready ? <LoaderCircle className="spin" size={16}/> : <Camera size={16}/>} {ready ? 'Start live try-on' : 'Loading try-on'}
