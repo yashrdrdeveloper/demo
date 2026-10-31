@@ -88,49 +88,135 @@ export function smoothLandmarks(previous, current, alpha = .62) {
   });
 }
 
-export function analyzePose(landmarks) {
+function averageVisibility(landmarks, indexes) {
+  const values = indexes.map((index) => landmarks?.[index]?.visibility ?? 0);
+  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+}
+
+function deepestVisibleLandmark(landmarks) {
+  const indexes = [11,12,13,14,15,16,23,24,25,26,27,28,29,30,31,32];
+  return indexes.reduce((bottom, index) => {
+    const item = landmarks?.[index];
+    if (!visible(item, .22)) return bottom;
+    return Math.max(bottom, clamp(item.y, 0, 1));
+  }, .45);
+}
+
+function describeCoverage(bottom, hipY, kneeY, ankleY) {
+  if (bottom <= hipY + .04) return 'torso';
+  if (bottom < kneeY - .03) return 'hips';
+  if (bottom < ankleY - .03) return 'legs';
+  return 'full';
+}
+
+export function analyzePersonMask(mask, landmarks = null) {
+  try {
+    const values = mask?.getAsUint8Array?.();
+    const width = mask?.width;
+    const height = mask?.height;
+    if (!values || !width || !height) return null;
+
+    const shoulderLeft = landmarks?.[11];
+    const shoulderRight = landmarks?.[12];
+    const hipLeft = landmarks?.[23];
+    const hipRight = landmarks?.[24];
+    const centers = [shoulderLeft, shoulderRight, hipLeft, hipRight].filter(Boolean).map((item) => item.x);
+    const centerX = centers.length ? centers.reduce((sum, value) => sum + value, 0) / centers.length : .5;
+    const shoulderSpan = shoulderLeft && shoulderRight ? Math.abs(shoulderRight.x - shoulderLeft.x) : .28;
+    const halfWindow = clamp(shoulderSpan * 1.15, .16, .36);
+    const startX = Math.max(0, Math.floor((centerX - halfWindow) * width));
+    const endX = Math.min(width - 1, Math.ceil((centerX + halfWindow) * width));
+    const requiredPerRow = Math.max(2, Math.floor((endX - startX) * .045));
+
+    let minY = height;
+    let maxY = -1;
+    let minX = width;
+    let maxX = -1;
+    let personPixels = 0;
+
+    for (let y = 0; y < height; y += 1) {
+      let rowPixels = 0;
+      for (let x = startX; x <= endX; x += 1) {
+        const category = values[y * width + x];
+        if (category === 0) continue;
+        rowPixels += 1;
+        personPixels += 1;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+      }
+      if (rowPixels >= requiredPerRow) {
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+    }
+
+    if (maxY < 0 || personPixels < 10) return null;
+    return {
+      top: clamp(minY / height, 0, 1),
+      bottom: clamp((maxY + 1) / height, 0, 1),
+      left: clamp(minX / width, 0, 1),
+      right: clamp((maxX + 1) / width, 0, 1),
+      touchesBottom: maxY >= height - 3,
+      source: 'pixels',
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function analyzePose(landmarks, personRegion = null) {
   if (!landmarks?.length) {
-    return { state: 'searching', mode: 'none', message: 'Step into the frame', quality: 0 };
+    return { state: 'searching', orientation: 'front', coverage: 'none', visibleBottom: .45, message: 'Step into the frame', quality: 0 };
   }
 
   const shoulders = [landmarks[11], landmarks[12]];
   const hips = [landmarks[23], landmarks[24]];
-  const ankles = [landmarks[27], landmarks[28]];
-  const knees = [landmarks[25], landmarks[26]];
-
-  if (![...shoulders, ...hips].every((item) => visible(item, .42))) {
-    return { state: 'searching', mode: 'none', message: 'Face the camera so shoulders and hips are visible', quality: .25 };
+  const hasShoulders = shoulders.every((item) => visible(item, .34));
+  if (!hasShoulders) {
+    return { state: 'searching', orientation: 'front', coverage: 'none', visibleBottom: personRegion?.bottom || .45, message: 'Keep your upper body visible', quality: .24 };
   }
 
-  const usable = landmarks.filter((item, index) => index >= 11 && visible(item, .25));
+  const usable = landmarks.filter((item, index) => index >= 11 && visible(item, .2));
   const xs = usable.map((item) => item.x);
-  const ys = usable.map((item) => item.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const bodyHeight = maxY - minY;
-  const centerX = (minX + maxX) / 2;
-  const fullBody = ankles.every((item) => visible(item, .30)) && knees.every((item) => visible(item, .30));
-  const depthTurn = Math.max(Math.abs((shoulders[0].z || 0) - (shoulders[1].z || 0)), Math.abs((hips[0].z || 0) - (hips[1].z || 0)));
+  const centerX = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : .5;
+  const shoulderY = (shoulders[0].y + shoulders[1].y) / 2;
+  const hipY = hips.every(Boolean) ? (hips[0].y + hips[1].y) / 2 : shoulderY + .28;
+  const kneeY = [landmarks[25], landmarks[26]].filter(Boolean).reduce((sum, item) => sum + item.y, 0) / Math.max(1, [landmarks[25], landmarks[26]].filter(Boolean).length) || hipY + .22;
+  const ankleY = [landmarks[27], landmarks[28]].filter(Boolean).reduce((sum, item) => sum + item.y, 0) / Math.max(1, [landmarks[27], landmarks[28]].filter(Boolean).length) || kneeY + .22;
 
-  if (centerX < .27 || centerX > .73) {
-    return { state: 'guidance', mode: fullBody ? 'full' : 'upper', message: 'Move to the center of the frame', quality: .55 };
+  const faceScore = averageVisibility(landmarks, [0,1,2,3,4,5,6,7,8]);
+  const shoulderDepth = Math.abs((shoulders[0]?.z || 0) - (shoulders[1]?.z || 0));
+  const hipDepth = hips.every(Boolean) ? Math.abs((hips[0]?.z || 0) - (hips[1]?.z || 0)) : 0;
+  const turnDepth = Math.max(shoulderDepth, hipDepth);
+  let orientation = 'front';
+  if (faceScore < .20 && averageVisibility(landmarks, [11,12,23,24]) > .42) orientation = 'back';
+  else if (turnDepth > .18 || Math.abs((shoulders[0]?.visibility || 0) - (shoulders[1]?.visibility || 0)) > .36) orientation = 'side';
+
+  const landmarkBottom = deepestVisibleLandmark(landmarks);
+  const visibleBottom = clamp(personRegion?.bottom ?? landmarkBottom, shoulderY + .08, 1);
+  const visibleTop = clamp(personRegion?.top ?? Math.min(shoulders[0].y, shoulders[1].y) - .16, 0, 1);
+  const coverage = describeCoverage(visibleBottom, hipY, kneeY, ankleY);
+  const bodyHeight = visibleBottom - visibleTop;
+
+  if (centerX < .20 || centerX > .80) {
+    return { state: 'guidance', orientation, coverage, visibleBottom, visibleTop, message: 'Move toward the center', quality: .52 };
   }
-  if (bodyHeight < .34) {
-    return { state: 'guidance', mode: fullBody ? 'full' : 'upper', message: 'Come a little closer', quality: .55 };
-  }
-  if (bodyHeight > .92) {
-    return { state: 'guidance', mode: fullBody ? 'full' : 'upper', message: 'Move back a little', quality: .55 };
-  }
-  if (depthTurn > .17) {
-    return { state: 'guidance', mode: fullBody ? 'full' : 'upper', message: 'Turn slightly toward the camera', quality: .58 };
-  }
-  if (!fullBody) {
-    return { state: 'locked', mode: 'upper', message: 'Upper-body saree preview locked', quality: .76 };
+  if (bodyHeight < .24) {
+    return { state: 'guidance', orientation, coverage, visibleBottom, visibleTop, message: 'Come a little closer', quality: .48 };
   }
 
-  return { state: 'locked', mode: 'full', message: 'Full-body saree fit locked', quality: .95 };
+  const orientationText = orientation === 'back' ? 'Back view' : orientation === 'side' ? 'Side view' : 'Front view';
+  const coverageText = coverage === 'full' ? 'full saree' : coverage === 'legs' ? 'saree through the legs' : coverage === 'hips' ? 'saree through the hips' : 'upper saree';
+  const pixelQuality = personRegion?.source === 'pixels' ? .96 : .78;
+  return {
+    state: 'locked',
+    orientation,
+    coverage,
+    visibleBottom,
+    visibleTop,
+    message: `${orientationText} · ${coverageText}`,
+    quality: pixelQuality,
+  };
 }
 
 function drawArmSegment(ctx, source, a, b, width) {
@@ -224,7 +310,53 @@ function drawSkinOcclusion(ctx, source, skinMask) {
   return true;
 }
 
-export function drawSareeTryOn({ canvas, source, landmarks, fabric, product, size = 'M', previewMode = 'full', skinMask = null, drawSource = false }) {
+function resolvedHips(landmarks, width, height, shoulderL, shoulderR, visibleBottomY) {
+  const hipL = point(landmarks, 23, width, height);
+  const hipR = point(landmarks, 24, width, height);
+  if (visible(landmarks?.[23], .18) && visible(landmarks?.[24], .18)) return [hipL, hipR];
+
+  const shoulderCenter = average(shoulderL, shoulderR);
+  const shoulderSpan = Math.max(20, Math.abs(shoulderR.x - shoulderL.x));
+  const estimatedY = Math.min(visibleBottomY - shoulderSpan * .12, shoulderCenter.y + shoulderSpan * 1.55);
+  return [
+    { x: shoulderCenter.x - shoulderSpan * .37, y: estimatedY },
+    { x: shoulderCenter.x + shoulderSpan * .37, y: estimatedY },
+  ];
+}
+
+function frontPallu(shoulderL, waistR, hipL, shoulderSpan, hipSpan, bottomY) {
+  const outer = {
+    x: Math.max(0, shoulderL.x - shoulderSpan * .58),
+    y: Math.min(bottomY, hipL.y + hipSpan * 1.28),
+  };
+  return [
+    { x: waistR.x + hipSpan * .04, y: waistR.y },
+    { x: shoulderL.x + shoulderSpan * .13, y: shoulderL.y - shoulderSpan * .05 },
+    { x: shoulderL.x - shoulderSpan * .22, y: shoulderL.y + shoulderSpan * .08 },
+    outer,
+    { x: hipL.x - hipSpan * .20, y: Math.min(bottomY, hipL.y + hipSpan * .18) },
+  ];
+}
+
+function backPallu(shoulderR, waistL, hipR, shoulderSpan, hipSpan, bottomY) {
+  const outer = {
+    x: Math.min(ctxWidthSafe(shoulderR.x + shoulderSpan * .58), shoulderR.x + shoulderSpan * .58),
+    y: Math.min(bottomY, hipR.y + hipSpan * 1.18),
+  };
+  return [
+    { x: waistL.x - hipSpan * .04, y: waistL.y },
+    { x: shoulderR.x - shoulderSpan * .12, y: shoulderR.y - shoulderSpan * .04 },
+    { x: shoulderR.x + shoulderSpan * .24, y: shoulderR.y + shoulderSpan * .08 },
+    outer,
+    { x: hipR.x + hipSpan * .18, y: Math.min(bottomY, hipR.y + hipSpan * .16) },
+  ];
+}
+
+function ctxWidthSafe(value) {
+  return Math.max(0, value);
+}
+
+export function drawSareeTryOn({ canvas, source, landmarks, fabric, product, size = 'M', viewState = null, skinMask = null, drawSource = false }) {
   if (!canvas || !source || !landmarks) return;
   const width = source.videoWidth || source.naturalWidth || source.width;
   const height = source.videoHeight || source.naturalHeight || source.height;
@@ -237,86 +369,94 @@ export function drawSareeTryOn({ canvas, source, landmarks, fabric, product, siz
 
   const shoulderL0 = point(landmarks, 11, width, height);
   const shoulderR0 = point(landmarks, 12, width, height);
-  const hipL0 = point(landmarks, 23, width, height);
-  const hipR0 = point(landmarks, 24, width, height);
-  if (![shoulderL0, shoulderR0, hipL0, hipR0].every(Boolean)) return;
+  if (![shoulderL0, shoulderR0].every(Boolean)) return;
 
   const scale = SIZE_SCALE[size] || 1;
   const [shoulderL, shoulderR] = expandPair(shoulderL0, shoulderR0, scale);
+  const shoulderCenter = average(shoulderL, shoulderR);
+  const shoulderSpan = Math.max(20, Math.abs(shoulderR.x - shoulderL.x));
+  const requestedBottom = clamp(viewState?.visibleBottom ?? deepestVisibleLandmark(landmarks), .18, .995) * height;
+  const minimumBottom = shoulderCenter.y + shoulderSpan * .85;
+  const bottomY = clamp(requestedBottom, minimumBottom, height * .995);
+  const [hipL0, hipR0] = resolvedHips(landmarks, width, height, shoulderL, shoulderR, bottomY);
   const [hipL, hipR] = expandPair(hipL0, hipR0, scale);
   const waistL = mix(shoulderL, hipL, .72);
   const waistR = mix(shoulderR, hipR, .72);
-  const shoulderCenter = average(shoulderL, shoulderR);
   const hipCenter = average(hipL, hipR);
   const hipSpan = Math.max(20, Math.hypot(hipR.x - hipL.x, hipR.y - hipL.y));
-  const shoulderSpan = Math.max(20, Math.abs(shoulderR.x - shoulderL.x));
-
-  let bottomY;
-  if (previewMode === 'full' && visible(landmarks[27], .2) && visible(landmarks[28], .2)) {
-    bottomY = Math.min(height * .985, Math.max(landmarks[27].y, landmarks[28].y) * height + hipSpan * .14);
-  } else {
-    bottomY = Math.min(height * .96, hipCenter.y + Math.max(height * .28, hipSpan * 2.2));
-  }
+  const orientation = viewState?.orientation || 'front';
 
   const fabricPattern = fabric ? ctx.createPattern(fabric, 'repeat') : null;
   try { fabricPattern?.setTransform?.(new DOMMatrix().scale(.72)); } catch {}
   const fallback = '#8f2948';
   const accent = product?.accent || '#d9b66f';
 
-  // Blouse base.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, width, bottomY + 2);
+  ctx.clip();
+
   const blouseTopL = { x: shoulderL.x - shoulderSpan * .12, y: shoulderL.y + shoulderSpan * .04 };
   const blouseTopR = { x: shoulderR.x + shoulderSpan * .12, y: shoulderR.y + shoulderSpan * .04 };
-  fillFabric(ctx, [blouseTopL, blouseTopR, waistR, waistL], fabricPattern, fallback, .92);
+  const blouseBottomY = Math.min(bottomY, Math.max(waistL.y, waistR.y));
+  const blouseWaistL = { x: waistL.x, y: blouseBottomY };
+  const blouseWaistR = { x: waistR.x, y: blouseBottomY };
+  fillFabric(ctx, [blouseTopL, blouseTopR, blouseWaistR, blouseWaistL], fabricPattern, fallback, orientation === 'back' ? .88 : .92);
 
-  // Wrapped lower saree.
-  const bottomHalf = Math.max(hipSpan * .70, shoulderSpan * .54);
-  const lowerLeft = { x: hipCenter.x - bottomHalf, y: bottomY };
-  const lowerRight = { x: hipCenter.x + bottomHalf, y: bottomY };
-  const lower = [
-    { x: waistL.x - hipSpan * .08, y: waistL.y },
-    { x: waistR.x + hipSpan * .08, y: waistR.y },
-    lowerRight,
-    lowerLeft,
-  ];
-  fillFabric(ctx, lower, fabricPattern, fallback, .97);
+  if (bottomY > blouseBottomY + hipSpan * .12) {
+    const bottomHalf = Math.max(hipSpan * .70, shoulderSpan * .54);
+    const lowerLeft = { x: hipCenter.x - bottomHalf, y: bottomY };
+    const lowerRight = { x: hipCenter.x + bottomHalf, y: bottomY };
+    const lower = [
+      { x: waistL.x - hipSpan * .08, y: blouseBottomY },
+      { x: waistR.x + hipSpan * .08, y: blouseBottomY },
+      lowerRight,
+      lowerLeft,
+    ];
+    fillFabric(ctx, lower, fabricPattern, fallback, .97);
 
-  // Center pleats preserve fabric texture while adding depth cues.
-  const pleatCenter = (waistL.x + waistR.x) / 2;
-  const pleatTopY = (waistL.y + waistR.y) / 2;
-  const pleatBottomY = bottomY - hipSpan * .08;
-  for (let i = -2; i <= 2; i += 1) {
-    const topX = pleatCenter + i * hipSpan * .075;
-    const bottomX = pleatCenter + i * hipSpan * .105;
-    ctx.save();
-    ctx.globalAlpha = .14 + (2 - Math.abs(i)) * .025;
-    ctx.strokeStyle = i % 2 ? '#fff' : '#241714';
-    ctx.lineWidth = Math.max(2, hipSpan * .022);
-    ctx.beginPath();
-    ctx.moveTo(topX, pleatTopY + hipSpan * .04);
-    ctx.lineTo(bottomX, pleatBottomY);
-    ctx.stroke();
-    ctx.restore();
+    const pleatCenter = (waistL.x + waistR.x) / 2;
+    const pleatTopY = blouseBottomY;
+    const pleatBottomY = Math.max(pleatTopY + 2, bottomY - hipSpan * .08);
+    if (orientation !== 'back' && pleatBottomY > pleatTopY + hipSpan * .3) {
+      for (let i = -2; i <= 2; i += 1) {
+        const topX = pleatCenter + i * hipSpan * .075;
+        const bottomX = pleatCenter + i * hipSpan * .105;
+        ctx.save();
+        ctx.globalAlpha = .14 + (2 - Math.abs(i)) * .025;
+        ctx.strokeStyle = i % 2 ? '#fff' : '#241714';
+        ctx.lineWidth = Math.max(2, hipSpan * .022);
+        ctx.beginPath();
+        ctx.moveTo(topX, pleatTopY + hipSpan * .04);
+        ctx.lineTo(bottomX, pleatBottomY);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    strokePath(ctx, [lowerLeft, lowerRight], accent, Math.max(4, hipSpan * .055));
+    strokePath(ctx, [waistL, waistR], accent, Math.max(2, hipSpan * .025));
   }
 
-  // Pallu from right waist across the torso to left shoulder, then flowing down the left side.
-  const palluOuter = {
-    x: Math.max(0, shoulderL.x - shoulderSpan * .58),
-    y: previewMode === 'full' ? Math.min(bottomY - hipSpan * .35, hipCenter.y + hipSpan * 1.28) : Math.min(height * .94, hipCenter.y + hipSpan * 1.1),
-  };
-  const pallu = [
-    { x: waistR.x + hipSpan * .04, y: waistR.y },
-    { x: shoulderL.x + shoulderSpan * .13, y: shoulderL.y - shoulderSpan * .05 },
-    { x: shoulderL.x - shoulderSpan * .22, y: shoulderL.y + shoulderSpan * .08 },
-    palluOuter,
-    { x: hipL.x - hipSpan * .20, y: hipL.y + hipSpan * .18 },
-  ];
-  fillFabric(ctx, pallu, fabricPattern, fallback, .94);
+  let pallu;
+  if (orientation === 'back') {
+    pallu = backPallu(shoulderR, waistL, hipR, shoulderSpan, hipSpan, bottomY);
+  } else if (orientation === 'side') {
+    const nearShoulder = shoulderL.x < shoulderR.x ? shoulderL : shoulderR;
+    const nearHip = hipL.x < hipR.x ? hipL : hipR;
+    pallu = [
+      { x: nearHip.x, y: Math.min(bottomY, nearHip.y) },
+      { x: nearShoulder.x, y: nearShoulder.y - shoulderSpan * .03 },
+      { x: nearShoulder.x - shoulderSpan * .18, y: nearShoulder.y + shoulderSpan * .08 },
+      { x: nearHip.x - shoulderSpan * .22, y: Math.min(bottomY, nearHip.y + hipSpan * .72) },
+    ];
+  } else {
+    pallu = frontPallu(shoulderL, waistR, hipL, shoulderSpan, hipSpan, bottomY);
+  }
 
-  // Realistic borders.
-  strokePath(ctx, [lowerLeft, lowerRight], accent, Math.max(4, hipSpan * .055));
-  strokePath(ctx, [pallu[2], palluOuter, pallu[4]], accent, Math.max(4, hipSpan * .05));
-  strokePath(ctx, [waistL, waistR], accent, Math.max(2, hipSpan * .025));
+  fillFabric(ctx, pallu, fabricPattern, fallback, orientation === 'side' ? .90 : .94);
+  strokePath(ctx, pallu.slice(2), accent, Math.max(4, hipSpan * .05));
+  ctx.restore();
 
-  // Keep the customer's arms/hands visually in front of the saree.
   if (!drawSkinOcclusion(ctx, source, skinMask)) drawPoseOcclusion(ctx, source, landmarks);
 }
