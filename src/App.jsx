@@ -28,7 +28,7 @@ export default function App() {
   return <div>
     {page !== 'studio' && <Header go={go} cart={cart} tryOn={() => openTryOn(product)}/>} 
     {page === 'home' && <Home openProduct={(selected) => { setProduct(selected); go('product'); }} openStudio={openTryOn}/>} 
-    {page === 'product' && <Product product={product} goBack={() => go('home')} openStudio={() => openTryOn(product)} addToBag={add}/>} 
+    {page === 'product' && <Product product={product} goBack={() => go('home')} openStudio={openTryOn} addToBag={add}/>} 
     {page === 'studio' && <Studio goHome={() => go('home')} addToBag={add} initialProduct={product}/>} 
     {page !== 'studio' && <footer><Logo light/><div><span>Private atelier</span><span>Crafted in India</span><span>Virtual try-on</span></div><small>Prototype experience · Maison Aara</small></footer>} 
     {toast && <div className="toast"><Check size={16}/><span><b>Added to your bag</b><small>{cart} item{cart !== 1 ? 's' : ''} ready</small></span><button onClick={() => setToast(false)}><X size={15}/></button></div>}
