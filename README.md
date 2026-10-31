@@ -1,20 +1,22 @@
-# Maison Aara — Boutique Configurator Prototype
+# Maison Aara — Virtual Boutique Prototype
 
-A premium React + Vite boutique prototype for made-to-measure fashion.
+A React + Vite fashion boutique prototype built around a Lenskart-style virtual try-on experience.
 
 ## What is included
 
-- Editorial boutique landing page and product collection
-- Category filters and premium product cards
-- Product-detail experience with colour and size selection
-- Interactive React Three Fiber 3D garment preview
-- Rotate and zoom controls
-- Silhouette, neckline, neck-depth, sleeve, fabric, colour, length, and embellishment customisation
-- Fabric-specific 3D material response
-- Made-to-measure drawer with measurement inputs
-- Live price calculation
-- Save-to-atelier and cart interactions
-- Responsive desktop and mobile configurator layouts
+- Premium boutique landing page and product collection
+- Product detail pages with colour and size selection
+- **Virtual Try-On** entry point from every product
+- Live browser camera support
+- Full-body photo upload fallback
+- MediaPipe Pose Landmarker body tracking
+- Garment placement using the customer's real shoulders, waist, hips, knees and ankles
+- Real-time garment movement as the customer changes pose
+- Foreground arm occlusion so the customer's arms remain in front of the garment
+- Instant switching between products while the camera stays open
+- Responsive desktop and mobile fitting-room layouts
+- Cart and size-selection interactions
+- Camera frames processed locally in the browser
 
 ## Run locally
 
@@ -23,6 +25,8 @@ npm install
 npm run dev
 ```
 
+Camera access works on `localhost` during development. A deployed version must be served over HTTPS for browser camera permissions.
+
 ## Production build
 
 ```bash
@@ -30,6 +34,10 @@ npm run build
 npm run preview
 ```
 
-## 3D approach
+## Virtual try-on approach
 
-The prototype intentionally generates the garment using procedural Three.js primitives so it works without external GLB files. For a production boutique, the same React configuration state can drive modular CLO3D / Marvelous Designer / Blender assets and PBR fabric textures for photorealistic garments.
+The prototype uses `@mediapipe/tasks-vision` Pose Landmarker in the browser. It detects body landmarks from live camera frames or an uploaded photo, then fits the selected garment overlay to those landmarks.
+
+There is **no generated mannequin/avatar** in the try-on flow.
+
+For production-quality photorealistic try-on, replace the current prototype garment overlay with prepared transparent garment assets or a dedicated virtual-try-on model/service while keeping the same camera, product-selection and fitting-room UX.
