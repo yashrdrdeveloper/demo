@@ -150,6 +150,40 @@ export function drawExactGarment(ctx, garment, bounds, anchors, garmentType = 'f
   drawBand(ctx, garment, { x0, y0: yHip, x1, y1: bottom }, [hipL, hipR, hemR, hemL]);
 }
 
+function drawCalibration(ctx, anchors, activeStep = 0) {
+  const width = ctx.canvas.width;
+  const height = ctx.canvas.height;
+  ctx.save();
+  ctx.lineWidth = Math.max(2, width * .002);
+  CALIBRATION_STEPS.forEach((step, index) => {
+    const anchor = anchors?.[step.key];
+    if (!anchor) return;
+    const x = anchor.x * width;
+    const y = anchor.y * height;
+    const size = Math.max(8, width * .009);
+    ctx.strokeStyle = index === activeStep ? '#ffcf70' : '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(x - size, y);
+    ctx.lineTo(x + size, y);
+    ctx.moveTo(x, y - size);
+    ctx.lineTo(x, y + size);
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+export function renderGarmentOverlay({ canvas, garment, bounds, anchors, garmentType, width, height, showCalibration = false, activeStep = 0 }) {
+  if (!canvas || !width || !height) return;
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  if (garment && bounds && anchors) drawExactGarment(ctx, garment, bounds, anchors, garmentType);
+  if (showCalibration) drawCalibration(ctx, anchors, activeStep);
+}
+
 export function renderTryOn({ canvas, person, garment, bounds, anchors, garmentType, showCalibration = false, activeStep = 0 }) {
   if (!canvas || !person) return;
   const ctx = canvas.getContext('2d');
@@ -163,27 +197,6 @@ export function renderTryOn({ canvas, person, garment, bounds, anchors, garmentT
   ctx.clearRect(0, 0, width, height);
   ctx.drawImage(person, 0, 0, width, height);
 
-  if (garment && bounds && anchors) {
-    drawExactGarment(ctx, garment, bounds, anchors, garmentType);
-  }
-
-  if (showCalibration) {
-    ctx.save();
-    ctx.lineWidth = Math.max(2, width * .002);
-    CALIBRATION_STEPS.forEach((step, index) => {
-      const anchor = anchors?.[step.key];
-      if (!anchor) return;
-      const x = anchor.x * width;
-      const y = anchor.y * height;
-      const size = Math.max(8, width * .009);
-      ctx.strokeStyle = index === activeStep ? '#ffcf70' : '#ffffff';
-      ctx.beginPath();
-      ctx.moveTo(x - size, y);
-      ctx.lineTo(x + size, y);
-      ctx.moveTo(x, y - size);
-      ctx.lineTo(x, y + size);
-      ctx.stroke();
-    });
-    ctx.restore();
-  }
+  if (garment && bounds && anchors) drawExactGarment(ctx, garment, bounds, anchors, garmentType);
+  if (showCalibration) drawCalibration(ctx, anchors, activeStep);
 }
