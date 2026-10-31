@@ -5,6 +5,7 @@ import App from './App';
 import './styles.css';
 import './tryon.css';
 import './tryon-fixes.css';
+import './magic-mirror.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
