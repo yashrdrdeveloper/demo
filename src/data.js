@@ -1,31 +1,81 @@
 export const COLORS = [
-  ['Ivory', '#E9E0D0'], ['Rose', '#B86D74'], ['Wine', '#6E2636'], ['Sage', '#76836A'],
-  ['Midnight', '#1E2732'], ['Maroon', '#812E39'], ['Champagne', '#C9AA82'],
+  ['Wine', '#7C2F3E'], ['Midnight', '#232A3A'], ['Sage', '#687C6A'], ['Rose', '#B56A73'],
+  ['Emerald', '#235A4A'], ['Champagne', '#C5A77B'], ['Black', '#171717'], ['Ivory', '#E9E0D0'],
 ].map(([name, hex]) => ({ name, hex }));
 
-export const FABRICS = [
-  { name: 'Chanderi', detail: 'Light · luminous', price: 900, roughness: .32, metalness: .08 },
-  { name: 'Silk', detail: 'Fluid · lustrous', price: 1300, roughness: .22, metalness: .12 },
-  { name: 'Cotton', detail: 'Soft · breathable', price: 0, roughness: .78, metalness: 0 },
-  { name: 'Velvet', detail: 'Plush · occasion', price: 1800, roughness: .9, metalness: 0 },
-];
-
 export const PRODUCTS = [
-  { id: 1, name: 'Aaira Anarkali', type: 'Anarkali', price: 4990, color: '#7C2F3E', badge: 'Bestseller', shape: 'anarkali' },
-  { id: 2, name: 'Noor Silk Kurta', type: 'Kurta Set', price: 3890, color: '#D5C3A5', badge: 'New', shape: 'straight' },
-  { id: 3, name: 'Meher Evening Gown', type: 'Gown', price: 7490, color: '#34453B', badge: 'Atelier', shape: 'gown' },
-  { id: 4, name: 'Ziya Festive Lehenga', type: 'Lehenga', price: 8990, color: '#AB7865', badge: 'Limited', shape: 'lehenga' },
-  { id: 5, name: 'Ira Chanderi Suit', type: 'Suit Set', price: 5590, color: '#B8A981', badge: 'Made to measure', shape: 'straight' },
-  { id: 6, name: 'Saira Draped Dress', type: 'Dress', price: 6290, color: '#3F4358', badge: 'Studio edit', shape: 'gown' },
-];
-
-export const NECKS = ['Round', 'V Neck', 'Square', 'Sweetheart', 'Boat'];
-export const SLEEVES = ['Sleeveless', 'Cap', 'Elbow', '3/4', 'Full'];
-export const SILHOUETTES = ['A-Line', 'Straight', 'Flared', 'Fitted'];
-export const LENGTHS = ['Knee', 'Calf', 'Ankle', 'Floor'];
-export const DETAILS = [
-  { name: 'Clean', price: 0 }, { name: 'Gold border', price: 550 },
-  { name: 'Thread work', price: 900 }, { name: 'Hand embroidery', price: 1500 },
+  {
+    id: 1,
+    name: 'Aarohi Silk Saree',
+    type: 'Saree',
+    garmentType: 'saree',
+    price: 6490,
+    color: '#7C2F3E',
+    accent: '#D5B06C',
+    badge: 'Bestseller',
+    fabric: 'Silk',
+    fitNote: 'Blouse + saree drape + pallu',
+  },
+  {
+    id: 2,
+    name: 'Nayra Organza Saree',
+    type: 'Saree',
+    garmentType: 'saree',
+    price: 7290,
+    color: '#687C6A',
+    accent: '#D7C69B',
+    badge: 'New',
+    fabric: 'Organza',
+    fitNote: 'Soft pleats + shoulder pallu',
+  },
+  {
+    id: 3,
+    name: 'Mira Satin One-Piece',
+    type: 'One-Piece',
+    garmentType: 'onepiece',
+    price: 4590,
+    color: '#232A3A',
+    accent: '#8E93A0',
+    badge: 'Try-on favourite',
+    fabric: 'Satin',
+    fitNote: 'Fitted waist + midi fall',
+  },
+  {
+    id: 4,
+    name: 'Rhea Floral One-Piece',
+    type: 'One-Piece',
+    garmentType: 'onepiece',
+    price: 3990,
+    color: '#B56A73',
+    accent: '#EBC7C1',
+    badge: 'New',
+    fabric: 'Crepe',
+    fitNote: 'A-line one-piece dress',
+  },
+  {
+    id: 5,
+    name: 'Zoya Evening Gown',
+    type: 'Gown',
+    garmentType: 'gown',
+    price: 8990,
+    color: '#235A4A',
+    accent: '#BCA06B',
+    badge: 'Occasion',
+    fabric: 'Georgette',
+    fitNote: 'Floor-length gown',
+  },
+  {
+    id: 6,
+    name: 'Ira Straight Kurti',
+    type: 'Kurti',
+    garmentType: 'kurti',
+    price: 2890,
+    color: '#C5A77B',
+    accent: '#8A6D43',
+    badge: 'Everyday',
+    fabric: 'Chanderi',
+    fitNote: 'Straight kurti silhouette',
+  },
 ];
 
 export const money = (value) => new Intl.NumberFormat('en-IN', {
