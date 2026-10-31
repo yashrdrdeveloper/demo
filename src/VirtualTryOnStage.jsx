@@ -3,6 +3,7 @@ import { Camera, ImagePlus, LoaderCircle, RefreshCcw, RotateCcw, ShieldCheck, Sp
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  analyzePersonMask,
   analyzePose,
   createSkinMaskCanvas,
   drawSareeTryOn,
@@ -77,13 +78,37 @@ async function createSkinSegmenter(vision) {
     outputConfidenceMasks: false,
   };
   try {
-    return await timeout(ImageSegmenter.createFromOptions(vision, base), 7000, 'Skin segmentation');
+    return await timeout(ImageSegmenter.createFromOptions(vision, base), 7000, 'Person segmentation');
   } catch {
     return timeout(ImageSegmenter.createFromOptions(vision, {
       ...base,
       baseOptions: { modelAssetPath: SEGMENT_MODEL },
-    }), 6000, 'Skin segmentation fallback');
+    }), 6000, 'Person segmentation fallback');
   }
+}
+
+function segmentStillImage(segmenter, image) {
+  return timeout(new Promise((resolve, reject) => {
+    try {
+      const maybeResult = segmenter.segment(image, (result) => resolve(result));
+      if (maybeResult?.categoryMask) resolve(maybeResult);
+    } catch (error) {
+      reject(error);
+    }
+  }), 4500, 'Photo segmentation');
+}
+
+function lockedMessage(state) {
+  if (!state) return 'Tracking';
+  const orientation = state.orientation === 'back' ? 'Back view' : state.orientation === 'side' ? 'Side view' : 'Front view';
+  const coverage = state.coverage === 'full'
+    ? 'full saree visible'
+    : state.coverage === 'legs'
+      ? 'saree fitted to visible legs'
+      : state.coverage === 'hips'
+        ? 'saree fitted to visible hips'
+        : 'saree fitted to visible torso';
+  return `${orientation} · ${coverage}`;
 }
 
 export default function VirtualTryOnStage({ product, size = 'M' }) {
@@ -99,6 +124,9 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
   const fabricRef = useRef(null);
   const lastPoseRef = useRef(null);
   const lastSkinMaskRef = useRef(null);
+  const lastPersonRegionRef = useRef(null);
+  const stableStateRef = useRef(null);
+  const orientationVoteRef = useRef({ value: 'front', count: 0 });
   const lastVideoTimeRef = useRef(-1);
   const lastPoseAtRef = useRef(0);
   const lastSegmentAtRef = useRef(0);
@@ -113,7 +141,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
   const [engine, setEngine] = useState('loading');
   const [segmentation, setSegmentation] = useState('idle');
   const [status, setStatus] = useState('Preparing automatic body tracking…');
-  const [fitState, setFitState] = useState({ state: 'searching', mode: 'none', quality: 0 });
+  const [fitState, setFitState] = useState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
   const [fabricReady, setFabricReady] = useState(false);
 
   const setModeSafe = useCallback((next) => {
@@ -127,6 +155,42 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
+  const stabilizeState = useCallback((next) => {
+    if (!next) return next;
+    if (next.state === 'searching') {
+      stableStateRef.current = next;
+      orientationVoteRef.current = { value: next.orientation || 'front', count: 0 };
+      return next;
+    }
+
+    const previous = stableStateRef.current;
+    let orientation = previous?.orientation || next.orientation || 'front';
+    if (next.orientation === orientation) {
+      orientationVoteRef.current = { value: orientation, count: 0 };
+    } else if (orientationVoteRef.current.value === next.orientation) {
+      orientationVoteRef.current.count += 1;
+      if (orientationVoteRef.current.count >= 5) {
+        orientation = next.orientation;
+        orientationVoteRef.current = { value: orientation, count: 0 };
+      }
+    } else {
+      orientationVoteRef.current = { value: next.orientation, count: 1 };
+    }
+
+    const visibleBottom = previous?.visibleBottom
+      ? previous.visibleBottom * .68 + next.visibleBottom * .32
+      : next.visibleBottom;
+    const stable = {
+      ...next,
+      orientation,
+      visibleBottom,
+      quality: previous?.quality ? previous.quality * .35 + next.quality * .65 : next.quality,
+    };
+    if (stable.state === 'locked') stable.message = lockedMessage(stable);
+    stableStateRef.current = stable;
+    return stable;
+  }, []);
+
   const render = useCallback((source, landmarks, state, drawSource = false) => {
     if (!source || !landmarks) return;
     drawSareeTryOn({
@@ -136,7 +200,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       fabric: fabricRef.current,
       product: productRef.current,
       size: sizeRef.current,
-      previewMode: state?.mode === 'full' ? 'full' : 'upper',
+      viewState: state,
       skinMask: lastSkinMaskRef.current,
       drawSource,
     });
@@ -150,7 +214,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       segmenterRef.current = await createSkinSegmenter(visionRef.current);
       if (mountedRef.current) setSegmentation('ready');
     } catch (error) {
-      console.warn('Skin segmentation unavailable; using pose occlusion fallback.', error);
+      console.warn('Person segmentation unavailable; using landmark visibility fallback.', error);
       if (mountedRef.current) setSegmentation('fallback');
     } finally {
       segmentLoadingRef.current = false;
@@ -217,7 +281,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
         setFabricReady(true);
         if (lastPoseRef.current) {
           const source = modeRef.current === 'camera' ? videoRef.current : sourceImageRef.current;
-          const currentState = analyzePose(lastPoseRef.current);
+          const currentState = stabilizeState(analyzePose(lastPoseRef.current, lastPersonRegionRef.current));
           render(source, lastPoseRef.current, currentState, modeRef.current === 'photo');
         }
       } catch (error) {
@@ -227,16 +291,16 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       }
     })();
     return () => { active = false; };
-  }, [product, render]);
+  }, [product, render, stabilizeState]);
 
   useEffect(() => {
     sizeRef.current = size;
     if (lastPoseRef.current) {
       const source = modeRef.current === 'camera' ? videoRef.current : sourceImageRef.current;
-      const currentState = analyzePose(lastPoseRef.current);
+      const currentState = stabilizeState(analyzePose(lastPoseRef.current, lastPersonRegionRef.current));
       render(source, lastPoseRef.current, currentState, modeRef.current === 'photo');
     }
-  }, [size, render]);
+  }, [size, render, stabilizeState]);
 
   const updateSegmentation = useCallback((source, now) => {
     const segmenter = segmenterRef.current;
@@ -245,17 +309,22 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     lastSegmentAtRef.current = now;
     try {
       segmenter.segmentForVideo(source, now, (result) => {
+        const pose = lastPoseRef.current;
         lastSkinMaskRef.current = createSkinMaskCanvas(result.categoryMask);
+        lastPersonRegionRef.current = analyzePersonMask(result.categoryMask, pose);
         segmentBusyRef.current = false;
-        if (lastPoseRef.current && modeRef.current === 'camera') {
-          render(source, lastPoseRef.current, analyzePose(lastPoseRef.current), false);
+        if (pose && modeRef.current === 'camera') {
+          const nextState = stabilizeState(analyzePose(pose, lastPersonRegionRef.current));
+          setFitState(nextState);
+          setStatus(nextState.message);
+          render(source, pose, nextState, false);
         }
       });
     } catch (error) {
       console.warn('Segmentation frame skipped.', error);
       segmentBusyRef.current = false;
     }
-  }, [render]);
+  }, [render, stabilizeState]);
 
   const cameraLoop = useCallback(() => {
     const video = videoRef.current;
@@ -272,7 +341,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
         if (detected) {
           const smoothed = smoothLandmarks(lastPoseRef.current, detected);
           lastPoseRef.current = smoothed;
-          const nextState = analyzePose(smoothed);
+          const nextState = stabilizeState(analyzePose(smoothed, lastPersonRegionRef.current));
           setFitState(nextState);
           setStatus(nextState.message);
           render(video, smoothed, nextState, false);
@@ -280,7 +349,9 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
         } else {
           lastPoseRef.current = null;
           lastSkinMaskRef.current = null;
-          setFitState({ state: 'searching', mode: 'none', quality: 0 });
+          lastPersonRegionRef.current = null;
+          stableStateRef.current = null;
+          setFitState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
           setStatus('Step into the frame — tracking will lock automatically');
           clearFrame();
         }
@@ -289,7 +360,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       }
     }
     rafRef.current = requestAnimationFrame(cameraLoop);
-  }, [clearFrame, render, updateSegmentation]);
+  }, [clearFrame, render, stabilizeState, updateSegmentation]);
 
   const stopCamera = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -300,6 +371,8 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     lastVideoTimeRef.current = -1;
     lastPoseRef.current = null;
     lastSkinMaskRef.current = null;
+    lastPersonRegionRef.current = null;
+    stableStateRef.current = null;
   }, []);
 
   const startCamera = useCallback(async () => {
@@ -310,7 +383,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     }
     stopCamera();
     setStatus('Opening camera…');
-    setFitState({ state: 'searching', mode: 'none', quality: 0 });
+    setFitState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
     try {
       await poseRef.current.setOptions({ runningMode: 'VIDEO' });
       if (segmenterRef.current) await segmenterRef.current.setOptions({ runningMode: 'VIDEO' });
@@ -328,7 +401,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       video.srcObject = stream;
       setModeSafe('camera');
       await timeout(video.play(), 6000, 'Camera start');
-      setStatus('Finding you automatically…');
+      setStatus('Finding your visible body automatically…');
       lastPoseAtRef.current = 0;
       lastVideoTimeRef.current = -1;
       initSegmentation();
@@ -346,7 +419,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
     const url = URL.createObjectURL(file);
     imageUrlRef.current = url;
-    setStatus('Analyzing your photo…');
+    setStatus('Analyzing visible body pixels…');
     setModeSafe('photo');
     try {
       const image = await loadImage(url);
@@ -355,38 +428,63 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       const result = poseRef.current.detect(image);
       const detected = result.landmarks?.[0];
       if (!detected) {
-        setFitState({ state: 'searching', mode: 'none', quality: 0 });
-        setStatus('No person detected. Use a clear front-facing photo.');
+        setFitState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
+        setStatus('No person detected. Use a clear photo with the body visible.');
         const canvas = canvasRef.current;
         canvas.width = image.naturalWidth;
         canvas.height = image.naturalHeight;
         canvas.getContext('2d').drawImage(image, 0, 0);
         return;
       }
+
       lastPoseRef.current = detected;
-      const nextState = analyzePose(detected);
+      lastPersonRegionRef.current = null;
+      lastSkinMaskRef.current = null;
+
+      if (segmenterRef.current) {
+        try {
+          await segmenterRef.current.setOptions({ runningMode: 'IMAGE' });
+          const segmentationResult = await segmentStillImage(segmenterRef.current, image);
+          lastSkinMaskRef.current = createSkinMaskCanvas(segmentationResult.categoryMask);
+          lastPersonRegionRef.current = analyzePersonMask(segmentationResult.categoryMask, detected);
+        } catch (error) {
+          console.warn('Photo pixel segmentation unavailable; using landmark visibility.', error);
+        }
+      }
+
+      const nextState = stabilizeState(analyzePose(detected, lastPersonRegionRef.current));
       setFitState(nextState);
-      setStatus(nextState.mode === 'full' ? 'Photo fitted automatically' : 'Upper-body saree preview fitted automatically');
+      setStatus(nextState.message);
       render(image, detected, nextState, true);
     } catch (error) {
       console.error(error);
       setStatus('Could not process that photo. Try another image.');
     }
-  }, [engine, render, setModeSafe, stopCamera]);
+  }, [engine, render, setModeSafe, stabilizeState, stopCamera]);
 
   const reset = useCallback(() => {
     stopCamera();
     setModeSafe('idle');
     lastPoseRef.current = null;
     lastSkinMaskRef.current = null;
+    lastPersonRegionRef.current = null;
     sourceImageRef.current = null;
+    stableStateRef.current = null;
     clearFrame();
-    setFitState({ state: 'searching', mode: 'none', quality: 0 });
+    setFitState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
     setStatus(engine === 'ready' ? 'Ready — start the camera or upload a photo' : 'Preparing automatic body tracking…');
   }, [clearFrame, engine, setModeSafe, stopCamera]);
 
   const ready = engine === 'ready';
   const locked = fitState.state === 'locked';
+  const coverageText = fitState.coverage === 'full'
+    ? 'Full visible body'
+    : fitState.coverage === 'legs'
+      ? 'Visible through legs'
+      : fitState.coverage === 'hips'
+        ? 'Visible through hips'
+        : 'Visible torso';
+  const orientationText = fitState.orientation === 'back' ? 'Back' : fitState.orientation === 'side' ? 'Side' : 'Front';
 
   return <div className="auto-tryon-stage">
     <div className="auto-tryon-viewport">
@@ -399,19 +497,19 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
 
       {mode === 'idle' && <div className="auto-empty">
         <div className="auto-icon"><Sparkles size={32}/></div>
-        <span className="eyebrow">AUTOMATIC SAREE TRY-ON</span>
-        <h2>No setup.<br/><em>Just step in.</em></h2>
-        <p>The camera finds your shoulders, hips and legs automatically. Stand farther back for the full saree, or use a closer selfie for the blouse and pallu preview.</p>
+        <span className="eyebrow">PIXEL-AWARE SAREE TRY-ON</span>
+        <h2>No fixed crop.<br/><em>It follows what is visible.</em></h2>
+        <p>The fitting room analyzes the visible person area. If the frame ends at your hips, the saree ends there. Step back and it extends naturally toward your knees and ankles. Turn around and it switches to the back drape.</p>
         {engine === 'error' ? <button className="btn dark" onClick={initialize}><RefreshCcw size={16}/> Retry tracker</button> : <div className="auto-start-actions">
           <button className="btn dark" disabled={!ready} onClick={startCamera}>{ready ? <Camera size={16}/> : <LoaderCircle className="spin" size={16}/>} {ready ? 'Start live try-on' : 'Preparing tracker'}</button>
           <label className={`btn outline ${!ready ? 'disabled' : ''}`}><ImagePlus size={16}/> Upload photo<input type="file" accept="image/*" disabled={!ready} onChange={(event) => handlePhoto(event.target.files?.[0])}/></label>
         </div>}
-        <div className="privacy"><ShieldCheck size={14}/><span>Body tracking runs on-device in your browser.</span></div>
+        <div className="privacy"><ShieldCheck size={14}/><span>Tracking and segmentation run in your browser.</span></div>
       </div>}
 
       {mode !== 'idle' && <>
         <div className={`auto-status ${fitState.state}`}>
-          <i className={locked ? 'lock-dot' : ''}/><span><b>{status}</b><small>{locked ? (fitState.mode === 'full' ? 'Full saree · live' : 'Selfie / upper-body preview') : 'The fit re-locks automatically when your body is visible'}</small></span>
+          <i className={locked ? 'lock-dot' : ''}/><span><b>{status}</b><small>{locked ? `${orientationText} · ${coverageText} · live` : 'The fit re-locks automatically when your body is visible'}</small></span>
         </div>
         <div className="quality-meter"><span style={{ width: `${Math.max(8, Math.round((fitState.quality || 0) * 100))}%` }}/></div>
         <div className="auto-actions">
@@ -424,7 +522,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
 
     <div className="auto-footnote">
       <b>{fabricReady ? 'Real fabric pixels loaded' : 'Fabric fallback active'}</b>
-      <span>{segmentation === 'ready' ? 'Skin/arm occlusion enhanced.' : 'Pose-based arm occlusion active.'} Tracking automatically reacquires after temporary loss.</span>
+      <span>{segmentation === 'ready' ? 'Visible-body pixels + skin/arm occlusion active.' : 'Landmark visibility fallback active.'} Tracking automatically reacquires after temporary loss.</span>
     </div>
   </div>;
 }
