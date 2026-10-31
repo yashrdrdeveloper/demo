@@ -1,668 +1,401 @@
-import { Camera, Check, ImagePlus, LoaderCircle, RefreshCcw, Shirt, Upload, Video, X } from 'lucide-react';
+import { FilesetResolver, ImageSegmenter, PoseLandmarker } from '@mediapipe/tasks-vision';
+import { Camera, Check, ImagePlus, LoaderCircle, RefreshCcw, RotateCcw, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
-  PHOTO_CALIBRATION_STEPS,
-  detectVisibleBounds,
-  getLiveCalibrationSteps,
-  renderGarmentOverlay,
-  renderTryOn,
+  analyzePose,
+  createSkinMaskCanvas,
+  drawSareeTryOn,
+  prepareFabricTexture,
+  smoothLandmarks,
 } from './TryOnRenderer';
 
-const OPENCV_URL = 'https://docs.opencv.org/4.x/opencv.js';
-let openCvPromise;
+const WASM_SOURCES = [
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm',
+  'https://unpkg.com/@mediapipe/tasks-vision@latest/wasm',
+];
+const POSE_MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
+const SEGMENT_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
+
+function timeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+    }),
+  ]).finally(() => window.clearTimeout(timer));
+}
 
 function loadImage(src, crossOrigin = false) {
-  return new Promise((resolve, reject) => {
+  return timeout(new Promise((resolve, reject) => {
     const image = new Image();
     if (crossOrigin) image.crossOrigin = 'anonymous';
     image.onload = () => resolve(image);
-    image.onerror = reject;
+    image.onerror = () => reject(new Error('Image could not load'));
     image.src = src;
-  });
+  }), 9000, 'Image loading');
 }
 
-function loadOpenCv() {
-  if (window.cv?.Mat) return Promise.resolve(window.cv);
-  if (openCvPromise) return openCvPromise;
-
-  openCvPromise = new Promise((resolve, reject) => {
-    const finish = async () => {
-      try {
-        let cv = window.cv;
-        if (cv && typeof cv.then === 'function') cv = await cv;
-        if (cv?.Mat) return resolve(cv);
-        if (cv) {
-          cv.onRuntimeInitialized = () => resolve(cv);
-          return;
-        }
-        reject(new Error('OpenCV runtime unavailable'));
-      } catch (error) {
-        reject(error);
-      }
-    };
-
-    const existing = document.querySelector('script[data-opencv-js]');
-    if (existing) {
-      existing.addEventListener('load', finish, { once: true });
-      existing.addEventListener('error', reject, { once: true });
-      return;
+async function resolveVision() {
+  let lastError;
+  for (const source of WASM_SOURCES) {
+    try {
+      return await timeout(FilesetResolver.forVisionTasks(source), 9000, 'Vision runtime');
+    } catch (error) {
+      lastError = error;
     }
-
-    const script = document.createElement('script');
-    script.src = OPENCV_URL;
-    script.async = true;
-    script.dataset.opencvJs = 'true';
-    script.onload = finish;
-    script.onerror = () => reject(new Error('Could not load OpenCV.js'));
-    document.head.appendChild(script);
-  });
-
-  return openCvPromise;
-}
-
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-
-function median(values) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-function estimateSimilarity(previous, current) {
-  if (previous.length < 3 || current.length !== previous.length) return null;
-  const prevCenter = previous.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-  const nextCenter = current.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-  prevCenter.x /= previous.length;
-  prevCenter.y /= previous.length;
-  nextCenter.x /= current.length;
-  nextCenter.y /= current.length;
-
-  let dot = 0;
-  let cross = 0;
-  let denom = 0;
-  previous.forEach((p, index) => {
-    const q = current[index];
-    const px = p.x - prevCenter.x;
-    const py = p.y - prevCenter.y;
-    const qx = q.x - nextCenter.x;
-    const qy = q.y - nextCenter.y;
-    dot += px * qx + py * qy;
-    cross += px * qy - py * qx;
-    denom += px * px + py * py;
-  });
-  if (denom < 1) return null;
-
-  let a = dot / denom;
-  let b = cross / denom;
-  const scale = Math.hypot(a, b);
-  const angle = Math.atan2(b, a);
-
-  // Optical flow can occasionally produce a wild transform. Prefer a stable mirror over a jump.
-  if (!Number.isFinite(scale) || scale < 0.94 || scale > 1.06 || Math.abs(angle) > 0.14) {
-    a = 1;
-    b = 0;
   }
+  throw lastError || new Error('Vision runtime unavailable');
+}
 
-  return {
-    a,
-    b,
-    tx: nextCenter.x - a * prevCenter.x + b * prevCenter.y,
-    ty: nextCenter.y - b * prevCenter.x - a * prevCenter.y,
+async function createPoseTracker(vision) {
+  const base = {
+    baseOptions: { modelAssetPath: POSE_MODEL, delegate: 'GPU' },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+    minPoseDetectionConfidence: .42,
+    minPosePresenceConfidence: .42,
+    minTrackingConfidence: .42,
+    outputSegmentationMasks: false,
   };
-}
-
-function transformAnchor(anchor, transform, width, height) {
-  const x = anchor.x * width;
-  const y = anchor.y * height;
-  return {
-    x: clamp((transform.a * x - transform.b * y + transform.tx) / width, 0.01, 0.99),
-    y: clamp((transform.b * x + transform.a * y + transform.ty) / height, 0.01, 0.99),
-  };
-}
-
-function torsoRect(anchors, width, height) {
-  const keys = ['leftShoulder', 'rightShoulder', 'leftHip', 'rightHip'];
-  if (keys.some((key) => !anchors[key])) return null;
-  const xs = keys.map((key) => anchors[key].x * width);
-  const ys = keys.map((key) => anchors[key].y * height);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const bodyW = Math.max(40, maxX - minX);
-  const bodyH = Math.max(60, maxY - minY);
-  const x = clamp(Math.floor(minX - bodyW * 0.28), 0, width - 2);
-  const y = clamp(Math.floor(minY - bodyH * 0.18), 0, height - 2);
-  const right = clamp(Math.ceil(maxX + bodyW * 0.28), x + 2, width);
-  const bottom = clamp(Math.ceil(maxY + bodyH * 0.28), y + 2, height);
-  return { x, y, width: right - x, height: bottom - y };
-}
-
-function fallbackPoints(anchors, width, height) {
-  const shoulderL = anchors.leftShoulder;
-  const shoulderR = anchors.rightShoulder;
-  const hipL = anchors.leftHip;
-  const hipR = anchors.rightHip;
-  const points = [shoulderL, shoulderR, hipL, hipR];
-  if (shoulderL && shoulderR && hipL && hipR) {
-    points.push(
-      { x: (shoulderL.x + shoulderR.x) / 2, y: (shoulderL.y + shoulderR.y) / 2 },
-      { x: (hipL.x + hipR.x) / 2, y: (hipL.y + hipR.y) / 2 },
-      { x: shoulderL.x * 0.42 + hipL.x * 0.58, y: shoulderL.y * 0.42 + hipL.y * 0.58 },
-      { x: shoulderR.x * 0.42 + hipR.x * 0.58, y: shoulderR.y * 0.42 + hipR.y * 0.58 },
-    );
-  }
-  return points.filter(Boolean).flatMap((p) => [p.x * width, p.y * height]);
-}
-
-function seedFeatures(cv, gray, anchors, width, height) {
-  const rect = torsoRect(anchors, width, height);
-  if (!rect || rect.width < 20 || rect.height < 20) {
-    return cv.matFromArray(4, 1, cv.CV_32FC2, fallbackPoints(anchors, width, height).slice(0, 8));
-  }
-
-  const roi = gray.roi(new cv.Rect(rect.x, rect.y, rect.width, rect.height));
-  const corners = new cv.Mat();
-  const mask = new cv.Mat();
-  let points = [];
   try {
-    cv.goodFeaturesToTrack(roi, corners, 90, 0.012, 7, mask, 7, false, 0.04);
-    for (let i = 0; i < corners.rows; i += 1) {
-      points.push(corners.data32F[i * 2] + rect.x, corners.data32F[i * 2 + 1] + rect.y);
-    }
-  } catch (error) {
-    console.warn('Feature detection fallback:', error);
-  } finally {
-    roi.delete();
-    corners.delete();
-    mask.delete();
+    return await timeout(PoseLandmarker.createFromOptions(vision, base), 12000, 'Body tracker');
+  } catch {
+    return timeout(PoseLandmarker.createFromOptions(vision, {
+      ...base,
+      baseOptions: { modelAssetPath: POSE_MODEL },
+    }), 12000, 'Body tracker fallback');
   }
-
-  if (points.length < 12) points = fallbackPoints(anchors, width, height);
-  const count = Math.max(1, Math.floor(points.length / 2));
-  return cv.matFromArray(count, 1, cv.CV_32FC2, points);
 }
 
-function mediaPointFromClick(event, canvas, video, mode) {
-  const rect = canvas.getBoundingClientRect();
-  if (mode !== 'live' || !video?.videoWidth || !video?.videoHeight) {
-    return {
-      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-      y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
-    };
+async function createSkinSegmenter(vision) {
+  const base = {
+    baseOptions: { modelAssetPath: SEGMENT_MODEL, delegate: 'GPU' },
+    runningMode: 'VIDEO',
+    outputCategoryMask: true,
+    outputConfidenceMasks: false,
+  };
+  try {
+    return await timeout(ImageSegmenter.createFromOptions(vision, base), 9000, 'Skin segmentation');
+  } catch {
+    return timeout(ImageSegmenter.createFromOptions(vision, {
+      ...base,
+      baseOptions: { modelAssetPath: SEGMENT_MODEL },
+    }), 9000, 'Skin segmentation fallback');
   }
-
-  const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
-  const displayWidth = video.videoWidth * scale;
-  const displayHeight = video.videoHeight * scale;
-  const offsetX = (rect.width - displayWidth) / 2;
-  const offsetY = (rect.height - displayHeight) / 2;
-  const visualX = clamp((event.clientX - rect.left - offsetX) / displayWidth, 0, 1);
-  const visualY = clamp((event.clientY - rect.top - offsetY) / displayHeight, 0, 1);
-
-  // The mirror is visually flipped with CSS; OpenCV receives the original camera frame.
-  return { x: 1 - visualX, y: visualY };
 }
 
 export default function VirtualTryOnStage({ product, size = 'M' }) {
-  const canvasRef = useRef(null);
   const videoRef = useRef(null);
-  const personRef = useRef(null);
-  const garmentRef = useRef(null);
-  const personObjectUrlRef = useRef('');
-  const garmentObjectUrlRef = useRef('');
+  const canvasRef = useRef(null);
+  const poseRef = useRef(null);
+  const segmenterRef = useRef(null);
+  const visionRef = useRef(null);
   const streamRef = useRef(null);
-  const trackerRef = useRef(null);
-  const anchorsRef = useRef({});
+  const rafRef = useRef(null);
+  const imageUrlRef = useRef('');
+  const sourceImageRef = useRef(null);
+  const fabricRef = useRef(null);
+  const lastPoseRef = useRef(null);
+  const lastSkinMaskRef = useRef(null);
+  const lastVideoTimeRef = useRef(-1);
+  const lastPoseAtRef = useRef(0);
+  const lastSegmentAtRef = useRef(0);
+  const segmentBusyRef = useRef(false);
   const modeRef = useRef('idle');
-  const garmentBoundsRef = useRef(null);
-  const garmentTypeRef = useRef(product.garmentType);
+  const productRef = useRef(product);
   const sizeRef = useRef(size);
 
   const [mode, setMode] = useState('idle');
-  const [personReady, setPersonReady] = useState(false);
-  const [garmentReady, setGarmentReady] = useState(false);
-  const [anchors, setAnchors] = useState({});
-  const [step, setStep] = useState(0);
-  const [calibrating, setCalibrating] = useState(false);
-  const [tracking, setTracking] = useState(false);
-  const [trackerLoading, setTrackerLoading] = useState(false);
-  const [message, setMessage] = useState('Choose live mirror or upload a photo.');
-  const [customGarment, setCustomGarment] = useState(false);
-
-  const liveSteps = getLiveCalibrationSteps(product.garmentType);
-  const photoSteps = PHOTO_CALIBRATION_STEPS;
-  const activeSteps = mode === 'live' ? liveSteps : photoSteps;
+  const [engine, setEngine] = useState('loading');
+  const [segmentation, setSegmentation] = useState('idle');
+  const [status, setStatus] = useState('Preparing automatic body tracking…');
+  const [fitState, setFitState] = useState({ state: 'searching', mode: 'none', quality: 0 });
+  const [fabricReady, setFabricReady] = useState(false);
 
   const setModeSafe = useCallback((next) => {
     modeRef.current = next;
     setMode(next);
   }, []);
 
-  const cleanupTracker = useCallback(() => {
-    const tracker = trackerRef.current;
-    if (!tracker) return;
-    if (tracker.raf) cancelAnimationFrame(tracker.raf);
-    tracker.prevGray?.delete?.();
-    tracker.prevPts?.delete?.();
-    tracker.cap?.delete?.();
-    trackerRef.current = null;
-    setTracking(false);
+  const clearFrame = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  const stopCamera = useCallback(() => {
-    cleanupTracker();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }, [cleanupTracker]);
-
-  const renderCurrentOverlay = useCallback((nextAnchors = anchorsRef.current, showCalibration = calibrating, activeStep = step) => {
-    const video = videoRef.current;
-    if (modeRef.current !== 'live' || !video?.videoWidth) return;
-    renderGarmentOverlay({
+  const render = useCallback((source, landmarks, state, drawSource = false) => {
+    if (!source || !landmarks) return;
+    drawSareeTryOn({
       canvas: canvasRef.current,
-      garment: garmentRef.current,
-      bounds: garmentBoundsRef.current,
-      anchors: nextAnchors,
-      garmentType: garmentTypeRef.current,
+      source,
+      landmarks,
+      fabric: fabricRef.current,
+      product: productRef.current,
       size: sizeRef.current,
-      width: video.videoWidth,
-      height: video.videoHeight,
-      showCalibration,
-      activeStep,
-      calibrationSteps: getLiveCalibrationSteps(garmentTypeRef.current),
+      previewMode: state?.mode === 'full' ? 'full' : 'upper',
+      skinMask: lastSkinMaskRef.current,
+      drawSource,
     });
-  }, [calibrating, step]);
+  }, []);
 
-  const redrawPhoto = useCallback(() => {
-    if (modeRef.current !== 'photo') return;
-    renderTryOn({
-      canvas: canvasRef.current,
-      person: personRef.current,
-      garment: garmentRef.current,
-      bounds: garmentBoundsRef.current,
-      anchors: anchorsRef.current,
-      garmentType: garmentTypeRef.current,
-      size: sizeRef.current,
-      showCalibration: calibrating,
-      activeStep: step,
-    });
-  }, [calibrating, step]);
+  const initSegmentation = useCallback(async () => {
+    if (segmenterRef.current || segmentation === 'loading' || !visionRef.current) return;
+    setSegmentation('loading');
+    try {
+      segmenterRef.current = await createSkinSegmenter(visionRef.current);
+      setSegmentation('ready');
+    } catch (error) {
+      console.warn('Skin segmentation unavailable; using pose occlusion fallback.', error);
+      setSegmentation('fallback');
+    }
+  }, [segmentation]);
 
-  const redraw = useCallback(() => {
-    if (modeRef.current === 'live') renderCurrentOverlay();
-    if (modeRef.current === 'photo') redrawPhoto();
-  }, [redrawPhoto, renderCurrentOverlay]);
+  const initialize = useCallback(async () => {
+    setEngine('loading');
+    setStatus('Preparing automatic body tracking…');
+    try {
+      poseRef.current?.close?.();
+      poseRef.current = null;
+      const vision = await resolveVision();
+      visionRef.current = vision;
+      poseRef.current = await createPoseTracker(vision);
+      setEngine('ready');
+      setStatus('Ready — start the camera or upload a photo');
+      window.setTimeout(() => initSegmentation(), 50);
+    } catch (error) {
+      console.error(error);
+      setEngine('error');
+      setStatus('Tracker could not load. Check your connection and retry.');
+    }
+  }, [initSegmentation]);
 
   useEffect(() => {
-    anchorsRef.current = anchors;
-    redraw();
-  }, [anchors, redraw]);
+    initialize();
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      poseRef.current?.close?.();
+      segmenterRef.current?.close?.();
+      if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
+    };
+  }, [initialize]);
+
+  useEffect(() => {
+    productRef.current = product;
+    let active = true;
+    setFabricReady(false);
+    (async () => {
+      try {
+        const image = await loadImage(product.textureUrl || product.photoUrl, true);
+        if (!active) return;
+        fabricRef.current = prepareFabricTexture(image, product.textureCrop);
+        setFabricReady(true);
+        if (lastPoseRef.current) {
+          const source = modeRef.current === 'camera' ? videoRef.current : sourceImageRef.current;
+          render(source, lastPoseRef.current, fitState, modeRef.current === 'photo');
+        }
+      } catch (error) {
+        console.warn('Fabric texture could not load; renderer will use a fallback tone.', error);
+        fabricRef.current = null;
+        setFabricReady(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [product, render]);
 
   useEffect(() => {
     sizeRef.current = size;
-    redraw();
-  }, [size, redraw]);
-
-  useEffect(() => {
-    garmentTypeRef.current = product.garmentType;
-    redraw();
-  }, [product.garmentType, redraw]);
-
-  useEffect(() => {
-    let active = true;
-    if (customGarment) return undefined;
-
-    if (!product.tryOnAsset) {
-      garmentRef.current = null;
-      garmentBoundsRef.current = null;
-      setGarmentReady(false);
-      setMessage('Upload the exact transparent front garment PNG/WebP for this product.');
-      redraw();
-      return undefined;
+    if (lastPoseRef.current) {
+      const source = modeRef.current === 'camera' ? videoRef.current : sourceImageRef.current;
+      render(source, lastPoseRef.current, fitState, modeRef.current === 'photo');
     }
+  }, [size, fitState, render]);
 
-    (async () => {
+  const updateSegmentation = useCallback((source, now, drawSource) => {
+    const segmenter = segmenterRef.current;
+    if (!segmenter || segmentation !== 'ready' || segmentBusyRef.current || now - lastSegmentAtRef.current < 110) return;
+    segmentBusyRef.current = true;
+    lastSegmentAtRef.current = now;
+    try {
+      if (modeRef.current === 'camera') {
+        segmenter.segmentForVideo(source, now, (result) => {
+          lastSkinMaskRef.current = createSkinMaskCanvas(result.categoryMask);
+          segmentBusyRef.current = false;
+          if (lastPoseRef.current) render(source, lastPoseRef.current, analyzePose(lastPoseRef.current), drawSource);
+        });
+      }
+    } catch (error) {
+      console.warn('Segmentation frame skipped.', error);
+      segmentBusyRef.current = false;
+    }
+  }, [render, segmentation]);
+
+  const cameraLoop = useCallback(() => {
+    const video = videoRef.current;
+    const pose = poseRef.current;
+    if (modeRef.current !== 'camera' || !video || !pose) return;
+
+    const now = performance.now();
+    if (video.readyState >= 2 && video.videoWidth && video.currentTime !== lastVideoTimeRef.current && now - lastPoseAtRef.current >= 42) {
+      lastVideoTimeRef.current = video.currentTime;
+      lastPoseAtRef.current = now;
       try {
-        const image = await loadImage(product.tryOnAsset, true);
-        if (!active) return;
-        const bounds = detectVisibleBounds(image);
-        garmentRef.current = image;
-        garmentBoundsRef.current = bounds;
-        setGarmentReady(true);
-        setMessage(modeRef.current === 'live' ? 'Garment ready. Calibrate the torso once.' : 'Exact garment ready. Choose live mirror or photo fitting.');
-        redraw();
-      } catch (error) {
-        console.error(error);
-        if (active) setMessage('Could not load the garment asset. Upload a transparent garment image instead.');
-      }
-    })();
-
-    return () => { active = false; };
-  }, [customGarment, product, redraw]);
-
-  useEffect(() => () => {
-    stopCamera();
-    if (personObjectUrlRef.current) URL.revokeObjectURL(personObjectUrlRef.current);
-    if (garmentObjectUrlRef.current) URL.revokeObjectURL(garmentObjectUrlRef.current);
-  }, [stopCamera]);
-
-  const trackFrame = useCallback(() => {
-    const tracker = trackerRef.current;
-    const video = videoRef.current;
-    if (!tracker || modeRef.current !== 'live' || !video?.videoWidth) return;
-
-    const { cv, cap } = tracker;
-    const frame = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-    const gray = new cv.Mat();
-    const nextPts = new cv.Mat();
-    const status = new cv.Mat();
-    const err = new cv.Mat();
-
-    try {
-      cap.read(frame);
-      cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
-      const winSize = new cv.Size(29, 29);
-      const criteria = new cv.TermCriteria(cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 24, 0.02);
-      cv.calcOpticalFlowPyrLK(tracker.prevGray, gray, tracker.prevPts, nextPts, status, err, winSize, 3, criteria);
-
-      const previousPoints = [];
-      const currentPoints = [];
-      const dx = [];
-      const dy = [];
-      for (let i = 0; i < tracker.prevPts.rows; i += 1) {
-        if (status.data[i] !== 1) continue;
-        const px = tracker.prevPts.data32F[i * 2];
-        const py = tracker.prevPts.data32F[i * 2 + 1];
-        const nx = nextPts.data32F[i * 2];
-        const ny = nextPts.data32F[i * 2 + 1];
-        if (![px, py, nx, ny].every(Number.isFinite)) continue;
-        previousPoints.push({ x: px, y: py });
-        currentPoints.push({ x: nx, y: ny });
-        dx.push(nx - px);
-        dy.push(ny - py);
-      }
-
-      if (previousPoints.length < 6) throw new Error('Too few tracked visual features');
-
-      const medianDx = median(dx);
-      const medianDy = median(dy);
-      const maxDeviation = Math.max(14, Math.min(video.videoWidth, video.videoHeight) * 0.035);
-      const filteredPrev = [];
-      const filteredNext = [];
-      currentPoints.forEach((point, index) => {
-        const flowX = point.x - previousPoints[index].x;
-        const flowY = point.y - previousPoints[index].y;
-        if (Math.hypot(flowX - medianDx, flowY - medianDy) <= maxDeviation) {
-          filteredPrev.push(previousPoints[index]);
-          filteredNext.push(point);
+        const result = pose.detectForVideo(video, now);
+        const detected = result.landmarks?.[0];
+        if (detected) {
+          const smoothed = smoothLandmarks(lastPoseRef.current, detected);
+          lastPoseRef.current = smoothed;
+          const nextState = analyzePose(smoothed);
+          setFitState(nextState);
+          setStatus(nextState.message);
+          render(video, smoothed, nextState, false);
+          updateSegmentation(video, now, false);
+        } else {
+          lastPoseRef.current = null;
+          lastSkinMaskRef.current = null;
+          setFitState({ state: 'searching', mode: 'none', quality: 0 });
+          setStatus('Step into the frame — tracking will lock automatically');
+          clearFrame();
         }
-      });
-
-      const transform = estimateSimilarity(filteredPrev, filteredNext);
-      if (!transform || filteredPrev.length < 5) throw new Error('Unstable torso transform');
-
-      const previousAnchors = anchorsRef.current;
-      const nextAnchors = {};
-      Object.entries(previousAnchors).forEach(([key, anchor]) => {
-        const transformed = transformAnchor(anchor, transform, video.videoWidth, video.videoHeight);
-        nextAnchors[key] = {
-          x: anchor.x * 0.38 + transformed.x * 0.62,
-          y: anchor.y * 0.38 + transformed.y * 0.62,
-        };
-      });
-
-      anchorsRef.current = nextAnchors;
-      renderCurrentOverlay(nextAnchors, false, 0);
-      tracker.frameCount += 1;
-
-      tracker.prevGray.delete();
-      tracker.prevPts.delete();
-      tracker.prevGray = gray.clone();
-
-      if (tracker.frameCount % 18 === 0 || filteredNext.length < 16) {
-        tracker.prevPts = seedFeatures(cv, gray, nextAnchors, video.videoWidth, video.videoHeight);
-      } else {
-        const packed = filteredNext.flatMap((point) => [point.x, point.y]);
-        tracker.prevPts = cv.matFromArray(filteredNext.length, 1, cv.CV_32FC2, packed);
+      } catch (error) {
+        console.warn('Pose frame skipped.', error);
       }
-    } catch (error) {
-      console.error(error);
-      cleanupTracker();
-      setMessage('Tracking paused. Face the camera and tap Recalibrate.');
-      setCalibrating(false);
-      renderCurrentOverlay(anchorsRef.current, false, 0);
-    } finally {
-      frame.delete();
-      gray.delete();
-      nextPts.delete();
-      status.delete();
-      err.delete();
     }
+    rafRef.current = requestAnimationFrame(cameraLoop);
+  }, [clearFrame, render, updateSegmentation]);
 
-    if (trackerRef.current) trackerRef.current.raf = requestAnimationFrame(trackFrame);
-  }, [cleanupTracker, renderCurrentOverlay]);
+  const stopCamera = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    lastVideoTimeRef.current = -1;
+    lastPoseRef.current = null;
+    lastSkinMaskRef.current = null;
+  }, []);
 
-  const startTracking = useCallback(async (nextAnchors) => {
-    const video = videoRef.current;
-    if (!video?.videoWidth) return;
-    cleanupTracker();
-    setTrackerLoading(true);
-    setMessage('Locking the garment to your torso…');
-
-    try {
-      const cv = await loadOpenCv();
-      if (modeRef.current !== 'live') return;
-      const cap = new cv.VideoCapture(video);
-      const frame = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-      const gray = new cv.Mat();
-      cap.read(frame);
-      cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
-      const pts = seedFeatures(cv, gray, nextAnchors, video.videoWidth, video.videoHeight);
-      if (pts.rows < 4) throw new Error('Not enough torso texture to track');
-
-      trackerRef.current = {
-        cv,
-        cap,
-        prevGray: gray.clone(),
-        prevPts: pts.clone(),
-        frameCount: 0,
-        raf: null,
-      };
-
-      frame.delete();
-      gray.delete();
-      pts.delete();
-      setTracking(true);
-      setMessage('Live fit locked — move naturally.');
-      trackerRef.current.raf = requestAnimationFrame(trackFrame);
-    } catch (error) {
-      console.error(error);
-      setMessage('Live tracker could not lock. Use good lighting and recalibrate your torso.');
-    } finally {
-      setTrackerLoading(false);
-    }
-  }, [cleanupTracker, trackFrame]);
-
-  const startLive = useCallback(async () => {
-    if (!garmentReady) {
-      setMessage('Load the exact garment asset first.');
-      return;
-    }
-
+  const startCamera = useCallback(async () => {
+    if (engine !== 'ready' || !poseRef.current) return;
     stopCamera();
-    setMessage('Opening camera…');
+    setStatus('Opening camera…');
+    setFitState({ state: 'searching', mode: 'none', quality: 0 });
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
+      await poseRef.current.setOptions({ runningMode: 'VIDEO' });
+      if (segmenterRef.current) await segmenterRef.current.setOptions({ runningMode: 'VIDEO' });
+      const stream = await timeout(navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 960 },
+          frameRate: { ideal: 30, max: 30 },
+        },
         audio: false,
-      });
+      }), 20000, 'Camera permission');
       streamRef.current = stream;
       const video = videoRef.current;
       video.srcObject = stream;
-      setModeSafe('live');
-      await video.play();
-      anchorsRef.current = {};
-      setAnchors({});
-      setStep(0);
-      setCalibrating(true);
-      const steps = getLiveCalibrationSteps(garmentTypeRef.current);
-      setMessage(`Tap ${steps[0].label.toLowerCase()} on the mirror`);
-      requestAnimationFrame(() => renderCurrentOverlay({}, true, 0));
+      setModeSafe('camera');
+      await timeout(video.play(), 6000, 'Camera start');
+      setStatus('Finding you automatically…');
+      lastPoseAtRef.current = 0;
+      lastVideoTimeRef.current = -1;
+      initSegmentation();
+      rafRef.current = requestAnimationFrame(cameraLoop);
     } catch (error) {
       console.error(error);
-      setMessage('Camera access was blocked. Use photo fitting instead.');
+      setModeSafe('idle');
+      setStatus(error?.name === 'NotAllowedError' ? 'Camera permission was blocked. Upload a photo instead.' : 'Camera did not start. Retry or upload a photo.');
     }
-  }, [garmentReady, renderCurrentOverlay, setModeSafe, stopCamera]);
+  }, [cameraLoop, engine, initSegmentation, setModeSafe, stopCamera]);
 
-  const handlePerson = async (file) => {
-    if (!file) return;
+  const handlePhoto = useCallback(async (file) => {
+    if (!file || engine !== 'ready' || !poseRef.current) return;
     stopCamera();
-    if (personObjectUrlRef.current) URL.revokeObjectURL(personObjectUrlRef.current);
+    if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
     const url = URL.createObjectURL(file);
-    personObjectUrlRef.current = url;
+    imageUrlRef.current = url;
+    setStatus('Analyzing your photo…');
+    setModeSafe('photo');
     try {
       const image = await loadImage(url);
-      personRef.current = image;
-      setModeSafe('photo');
-      setPersonReady(true);
-      anchorsRef.current = {};
-      setAnchors({});
-      setStep(0);
-      setCalibrating(false);
-      setMessage(garmentRef.current ? 'Photo ready. Start body calibration.' : 'Photo ready. Upload the exact garment cutout.');
-      requestAnimationFrame(redrawPhoto);
-    } catch (error) {
-      console.error(error);
-      setMessage('Could not open that photo.');
-    }
-  };
-
-  const handleGarment = async (file) => {
-    if (!file) return;
-    if (garmentObjectUrlRef.current) URL.revokeObjectURL(garmentObjectUrlRef.current);
-    const url = URL.createObjectURL(file);
-    garmentObjectUrlRef.current = url;
-    try {
-      const image = await loadImage(url);
-      const bounds = detectVisibleBounds(image);
-      garmentRef.current = image;
-      garmentBoundsRef.current = bounds;
-      setGarmentReady(true);
-      setCustomGarment(true);
-      cleanupTracker();
-      setMessage(modeRef.current === 'live' ? 'Garment loaded. Tap Recalibrate to lock it to your torso.' : 'Exact garment loaded. Choose live mirror or upload your photo.');
-      redraw();
-    } catch (error) {
-      console.error(error);
-      setMessage('Could not open that garment image. Use a transparent PNG/WebP if possible.');
-    }
-  };
-
-  const startCalibration = () => {
-    if (!garmentReady || (modeRef.current === 'photo' && !personReady) || modeRef.current === 'idle') {
-      setMessage('Start the live mirror or add a photo first.');
-      return;
-    }
-    cleanupTracker();
-    anchorsRef.current = {};
-    setAnchors({});
-    setStep(0);
-    setCalibrating(true);
-    const steps = modeRef.current === 'live' ? getLiveCalibrationSteps(garmentTypeRef.current) : PHOTO_CALIBRATION_STEPS;
-    setMessage(`Tap ${steps[0].label.toLowerCase()}`);
-    if (modeRef.current === 'live') renderCurrentOverlay({}, true, 0);
-  };
-
-  const handleCanvasClick = (event) => {
-    if (!calibrating || !canvasRef.current) return;
-    const steps = modeRef.current === 'live' ? getLiveCalibrationSteps(garmentTypeRef.current) : PHOTO_CALIBRATION_STEPS;
-    const point = mediaPointFromClick(event, canvasRef.current, videoRef.current, modeRef.current);
-    const current = steps[step];
-    if (!current) return;
-
-    const nextAnchors = { ...anchorsRef.current, [current.key]: point };
-    anchorsRef.current = nextAnchors;
-    setAnchors(nextAnchors);
-
-    const nextStep = step + 1;
-    if (nextStep >= steps.length) {
-      setStep(nextStep);
-      setCalibrating(false);
-      if (modeRef.current === 'live') {
-        renderCurrentOverlay(nextAnchors, false, 0);
-        startTracking(nextAnchors);
-      } else {
-        setMessage('Photo fitting complete. Change size to compare the exact garment fit.');
+      sourceImageRef.current = image;
+      await poseRef.current.setOptions({ runningMode: 'IMAGE' });
+      const result = poseRef.current.detect(image);
+      const detected = result.landmarks?.[0];
+      if (!detected) {
+        setFitState({ state: 'searching', mode: 'none', quality: 0 });
+        setStatus('No person detected. Use a clear front-facing photo.');
+        const canvas = canvasRef.current;
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        canvas.getContext('2d').drawImage(image, 0, 0);
+        return;
       }
-    } else {
-      setStep(nextStep);
-      setMessage(`Tap ${steps[nextStep].label.toLowerCase()}`);
-      if (modeRef.current === 'live') renderCurrentOverlay(nextAnchors, true, nextStep);
+      lastPoseRef.current = detected;
+      const nextState = analyzePose(detected);
+      setFitState(nextState);
+      setStatus(nextState.mode === 'full' ? 'Photo fitted automatically' : 'Upper-body saree preview fitted automatically');
+      render(image, detected, nextState, true);
+    } catch (error) {
+      console.error(error);
+      setStatus('Could not process that photo. Try another image.');
     }
-  };
+  }, [engine, render, setModeSafe, stopCamera]);
 
-  const reset = () => {
-    cleanupTracker();
-    anchorsRef.current = {};
-    setAnchors({});
-    setStep(0);
-    setCalibrating(false);
-    setMessage(modeRef.current === 'live' ? 'Tap Recalibrate to lock the garment again.' : 'Ready to calibrate again.');
-    redraw();
-  };
-
-  const closeLive = () => {
+  const reset = useCallback(() => {
     stopCamera();
     setModeSafe('idle');
-    anchorsRef.current = {};
-    setAnchors({});
-    setCalibrating(false);
-    setMessage('Choose live mirror or upload a photo.');
-    const canvas = canvasRef.current;
-    if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-  };
+    lastPoseRef.current = null;
+    lastSkinMaskRef.current = null;
+    sourceImageRef.current = null;
+    clearFrame();
+    setFitState({ state: 'searching', mode: 'none', quality: 0 });
+    setStatus(engine === 'ready' ? 'Ready — start the camera or upload a photo' : 'Preparing automatic body tracking…');
+  }, [clearFrame, engine, setModeSafe, stopCamera]);
 
-  return <div className="nonai-stage">
-    <div className="nonai-canvas-wrap">
-      <video ref={videoRef} className={`nonai-live-video ${mode === 'live' ? 'visible' : ''}`} playsInline muted/>
-      <canvas
-        ref={canvasRef}
-        onClick={handleCanvasClick}
-        className={`${calibrating ? 'is-calibrating' : ''} ${mode === 'live' ? 'live-overlay' : ''}`}
-      />
+  const ready = engine === 'ready';
+  const locked = fitState.state === 'locked';
 
-      {mode === 'idle' && <div className="nonai-empty">
-        <div className="nonai-icon"><Shirt size={34}/></div>
-        <span className="eyebrow">LIVE VIRTUAL TRIAL ROOM</span>
-        <h2>Your body.<br/><em>The exact garment.</em></h2>
-        <p>Choose your size, open the camera and tap four torso points once. The app tracks many visual features around your torso so the complete garment moves as one stable layer.</p>
-        <div className="nonai-start-actions">
-          <button className="btn dark" disabled={!garmentReady} onClick={startLive}><Camera size={16}/> Start live mirror</button>
-          <label className="btn outline"><ImagePlus size={16}/> Fit on photo<input type="file" accept="image/*" onChange={(event) => handlePerson(event.target.files?.[0])}/></label>
+  return <div className="auto-tryon-stage">
+    <div className="auto-tryon-viewport">
+      <video ref={videoRef} className={`auto-camera ${mode === 'camera' ? 'visible' : ''}`} playsInline muted/>
+      <canvas ref={canvasRef} className={`auto-overlay ${mode === 'camera' ? 'mirrored' : ''}`}/>
+
+      {mode === 'camera' && <div className={`body-guide ${locked ? 'locked' : ''}`} aria-hidden="true">
+        <div className="body-guide-frame"><span/><span/><span/><span/></div>
+      </div>}
+
+      {mode === 'idle' && <div className="auto-empty">
+        <div className="auto-icon"><Sparkles size={32}/></div>
+        <span className="eyebrow">AUTOMATIC SAREE TRY-ON</span>
+        <h2>No setup.<br/><em>Just step in.</em></h2>
+        <p>The camera finds your shoulders, waist, hips and legs automatically. Stand farther back for a full saree, or use a closer selfie for an upper-body pallu preview.</p>
+        {engine === 'error' ? <button className="btn dark" onClick={initialize}><RefreshCcw size={16}/> Retry tracker</button> : <div className="auto-start-actions">
+          <button className="btn dark" disabled={!ready} onClick={startCamera}>{ready ? <Camera size={16}/> : <LoaderCircle className="spin" size={16}/>} {ready ? 'Start live try-on' : 'Preparing tracker'}</button>
+          <label className={`btn outline ${!ready ? 'disabled' : ''}`}><ImagePlus size={16}/> Upload photo<input type="file" accept="image/*" disabled={!ready} onChange={(event) => handlePhoto(event.target.files?.[0])}/></label>
+        </div>}
+        <div className="privacy"><ShieldCheck size={14}/><span>Body tracking runs on-device in your browser.</span></div>
+      </div>}
+
+      {mode !== 'idle' && <>
+        <div className={`auto-status ${fitState.state}`}>
+          <i className={locked ? 'lock-dot' : ''}/><span><b>{status}</b><small>{locked ? (fitState.mode === 'full' ? 'Full saree · live' : 'Selfie / upper-body preview') : 'The fit will recover automatically when you are visible'}</small></span>
         </div>
-        <label className="nonai-garment-upload"><Upload size={14}/> Use another exact garment PNG/WebP<input type="file" accept="image/png,image/webp,image/*" onChange={(event) => handleGarment(event.target.files?.[0])}/></label>
-      </div>}
-
-      {mode !== 'idle' && <div className="nonai-toolbar">
-        {mode === 'photo' && <label><ImagePlus size={15}/> Change photo<input type="file" accept="image/*" onChange={(event) => handlePerson(event.target.files?.[0])}/></label>}
-        <label><Upload size={15}/> Exact garment PNG<input type="file" accept="image/png,image/webp,image/*" onChange={(event) => handleGarment(event.target.files?.[0])}/></label>
-        <button onClick={startCalibration}><RefreshCcw size={15}/> Recalibrate</button>
-        <button onClick={reset}><X size={15}/> Reset fit</button>
-        {mode === 'live' && <button onClick={closeLive}><Video size={15}/> Close live</button>}
-      </div>}
-
-      {mode !== 'idle' && <div className={`nonai-status ${calibrating ? 'active' : ''}`}>
-        {trackerLoading ? <LoaderCircle className="spin" size={14}/> : calibrating ? <span>{step + 1}/{activeSteps.length}</span> : tracking ? <span className="tracking-dot"/> : <Check size={14}/>}<b>{message}</b>
-      </div>}
+        <div className="quality-meter"><span style={{ width: `${Math.max(8, Math.round((fitState.quality || 0) * 100))}%` }}/></div>
+        <div className="auto-actions">
+          {mode === 'camera' && <button onClick={startCamera}><RotateCcw size={15}/> Restart camera</button>}
+          <label><ImagePlus size={15}/> Use photo<input type="file" accept="image/*" onChange={(event) => handlePhoto(event.target.files?.[0])}/></label>
+          <button onClick={reset}><X size={15}/> Close</button>
+        </div>
+      </>}
     </div>
 
-    <div className="nonai-explainer">
-      <b>{mode === 'live' ? 'Stable live layer' : 'Exact-pixel fitting'}</b>
-      <span>{mode === 'live' ? 'The whole garment follows a torso transform estimated from many optical-flow features, reducing point drift.' : 'Prints, logos, embroidery, neckline and sleeve shape come from the real transparent SKU asset.'}</span>
+    <div className="auto-footnote">
+      <b>{fabricReady ? 'Real fabric pixels loaded' : 'Fabric fallback active'}</b>
+      <span>{segmentation === 'ready' ? 'Skin/arm occlusion enhanced.' : 'Pose-based arm occlusion active.'} Tracking automatically reacquires if you leave and re-enter frame.</span>
     </div>
   </div>;
 }
