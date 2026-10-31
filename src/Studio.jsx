@@ -1,26 +1,50 @@
-import { ArrowLeft, Check, ShieldCheck, ShoppingBag, Sparkles } from 'lucide-react';
-import { useState } from 'react';
+import { ArrowLeft, Check, Ruler, ShieldCheck, ShoppingBag, Shirt } from 'lucide-react';
+import { useMemo, useState } from 'react';
 
 import GarmentArt from './GarmentArt';
 import VirtualTryOnStage from './VirtualTryOnStage';
 import { PRODUCTS, money } from './data';
 
+function recommendSize(product, measurements) {
+  const chart = product.sizeChart;
+  if (!chart || !measurements.chest) return null;
+  const sizes = ['XS', 'S', 'M', 'L', 'XL'];
+  const required = {
+    chest: Number(measurements.chest) + 4,
+    waist: Number(measurements.waist || 0) + 2,
+    hip: Number(measurements.hip || 0) + 2,
+  };
+
+  return sizes.find((size) => {
+    const row = chart[size];
+    if (!row) return false;
+    if (row.chest && row.chest < required.chest) return false;
+    if (required.waist > 2 && row.waist && row.waist < required.waist) return false;
+    if (required.hip > 2 && row.hip && row.hip < required.hip) return false;
+    return true;
+  }) || 'XL';
+}
+
 export default function Studio({ goHome, addToBag, initialProduct }) {
   const [product, setProduct] = useState(initialProduct || PRODUCTS[0]);
   const [size, setSize] = useState('M');
+  const [measurements, setMeasurements] = useState({ height: '', chest: '', waist: '', hip: '' });
+  const recommended = useMemo(() => recommendSize(product, measurements), [product, measurements]);
 
-  return <main className="virtual-room">
+  const updateMeasurement = (key, value) => setMeasurements((current) => ({ ...current, [key]: value }));
+
+  return <main className="virtual-room nonai-room">
     <div className="virtual-topbar">
       <button onClick={goHome}><ArrowLeft size={16}/> Boutique</button>
-      <div><span>MAISON AARA</span><b>Online Magic Mirror</b></div>
-      <div className="desktop"><ShieldCheck size={14}/> Browser-based live fitting</div>
+      <div><span>MAISON AARA</span><b>Virtual Trial Room</b></div>
+      <div className="desktop"><ShieldCheck size={14}/> No AI · deterministic fitting</div>
     </div>
 
     <div className="virtual-layout">
-      <section className="virtual-camera-panel">
+      <section className="virtual-camera-panel nonai-panel">
         <VirtualTryOnStage product={product}/>
         <div className="tryon-filmstrip">
-          <div className="filmstrip-head"><div><span className="eyebrow">CHANGE OUTFIT LIVE</span><b>Keep the mirror open</b></div><small>{PRODUCTS.length} try-on pieces</small></div>
+          <div className="filmstrip-head"><div><span className="eyebrow">TRY ANOTHER PRODUCT</span><b>Exact SKU assets</b></div><small>{PRODUCTS.length} examples</small></div>
           <div className="filmstrip-items">{PRODUCTS.map((item) => <button key={item.id} className={item.id === product.id ? 'active' : ''} onClick={() => setProduct(item)}>
             <GarmentArt product={item} compact/>
             <span>{item.type}</span>
@@ -29,10 +53,18 @@ export default function Studio({ goHome, addToBag, initialProduct }) {
       </section>
 
       <aside className="virtual-product-panel">
-        <span className="eyebrow">NOW TRYING ON</span>
+        <span className="eyebrow">NOW FITTING</span>
         <div className="virtual-product-thumb"><GarmentArt product={product}/></div>
         <div className="virtual-product-title"><div><small>{product.type} · {product.fabric}</small><h1>{product.name}</h1></div><b>{money(product.price)}</b></div>
-        <p className="virtual-copy">{product.garmentType === 'saree' ? 'The saree renderer fits a blouse, wrapped lower drape, center pleats and a pallu across the shoulder.' : product.garmentType === 'onepiece' ? 'The one-piece renderer follows the shoulders, waist and hips as one continuous dress.' : `This ${product.type.toLowerCase()} uses its own garment geometry instead of a generic dress overlay.`}</p>
+        <p className="virtual-copy">{product.fitNote}</p>
+
+        <div className="measurements-box">
+          <div className="measurements-title"><Ruler size={15}/><div><b>Your measurements</b><small>Centimetres · used only for deterministic size/fit estimation</small></div></div>
+          <div className="measurement-grid">
+            {['height', 'chest', 'waist', 'hip'].map((key) => <label key={key}><span>{key}</span><input type="number" min="0" placeholder="cm" value={measurements[key]} onChange={(event) => updateMeasurement(key, event.target.value)}/></label>)}
+          </div>
+          {recommended && <div className="fit-result"><Check size={15}/><span><b>Recommended size: {recommended}</b><small>Based on garment measurements plus basic ease allowance.</small></span></div>}
+        </div>
 
         <div className="virtual-size">
           <div><b>Choose size</b><u>Size guide</u></div>
@@ -41,9 +73,9 @@ export default function Studio({ goHome, addToBag, initialProduct }) {
 
         <button className="btn dark full" onClick={addToBag}>Add {product.type.toLowerCase()} to bag <ShoppingBag size={15}/></button>
         <div className="tryon-benefits">
-          <p><Check size={14}/><span><b>Real customer camera</b><small>No mannequin or generated avatar</small></span></p>
-          <p><Sparkles size={14}/><span><b>Garment-specific fitting</b><small>Saree, one-piece, gown and kurti render differently</small></span></p>
-          <p><ShieldCheck size={14}/><span><b>Online retail flow</b><small>Try multiple products without leaving the fitting room</small></span></p>
+          <p><Shirt size={14}/><span><b>Exact garment pixels</b><small>Logo, print, embroidery and garment edges come from the SKU asset</small></span></p>
+          <p><Ruler size={14}/><span><b>Measurement-based fit</b><small>No inferred body dimensions; the customer supplies real measurements</small></span></p>
+          <p><ShieldCheck size={14}/><span><b>No AI</b><small>No body model, generative image or pose model is used</small></span></p>
         </div>
       </aside>
     </div>
