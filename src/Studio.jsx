@@ -1,255 +1,455 @@
-import { Canvas } from '@react-three/fiber';
-import { ContactShadows, Environment, Html, OrbitControls, useGLTF } from '@react-three/drei';
-import { ArrowLeft, ArrowRight, Check, ChevronDown, Heart, RotateCcw, ShoppingBag, Sparkles, X } from 'lucide-react';
-import { Suspense, useMemo, useState } from 'react';
-import * as THREE from 'three';
-import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
+import {
+  ArrowLeft,
+  Camera,
+  Check,
+  ImagePlus,
+  LoaderCircle,
+  RefreshCcw,
+  ScanLine,
+  ShieldCheck,
+  ShoppingBag,
+  Sparkles,
+  X,
+} from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { COLORS, DETAILS, FABRICS, LENGTHS, NECKS, SILHOUETTES, SLEEVES, money } from './data';
+import GarmentArt from './GarmentArt';
+import { PRODUCTS, money } from './data';
 
-const AVATAR_URL = 'https://cdn.jsdelivr.net/gh/927tanmay/react-ai-voice-avatar@avatars-v2/assets/avatars/ananya.glb';
-const SKIN = '#c99177';
+const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
+const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
 
-function fabricProps(name) {
-  if (name === 'Silk') return { roughness: .2, metalness: .03, sheen: 1, sheenRoughness: .2, clearcoat: .14 };
-  if (name === 'Chanderi') return { roughness: .31, metalness: .02, sheen: .8, sheenRoughness: .3, clearcoat: .08 };
-  if (name === 'Velvet') return { roughness: .88, metalness: 0, sheen: 1, sheenRoughness: .78, clearcoat: 0 };
-  return { roughness: .72, metalness: 0, sheen: .15, sheenRoughness: .7, clearcoat: 0 };
+const point = (landmark, width, height) => ({
+  x: landmark.x * width,
+  y: landmark.y * height,
+  visibility: landmark.visibility ?? 1,
+});
+
+function buildGarmentPath(ctx, landmarks, width, height, product) {
+  const ls = point(landmarks[11], width, height);
+  const rs = point(landmarks[12], width, height);
+  const lh = point(landmarks[23], width, height);
+  const rh = point(landmarks[24], width, height);
+  const lk = point(landmarks[25], width, height);
+  const rk = point(landmarks[26], width, height);
+  const la = point(landmarks[27], width, height);
+  const ra = point(landmarks[28], width, height);
+
+  const leftShoulder = ls.x < rs.x ? ls : rs;
+  const rightShoulder = ls.x < rs.x ? rs : ls;
+  const leftHip = lh.x < rh.x ? lh : rh;
+  const rightHip = lh.x < rh.x ? rh : lh;
+  const shoulderWidth = Math.abs(rightShoulder.x - leftShoulder.x);
+  const hipWidth = Math.max(Math.abs(rightHip.x - leftHip.x), shoulderWidth * .64);
+  const centerX = (leftHip.x + rightHip.x) / 2;
+  const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+  const hipY = (leftHip.y + rightHip.y) / 2;
+  const kneeY = (lk.y + rk.y) / 2;
+  const ankleY = (la.y + ra.y) / 2;
+  const bodyHeight = Math.max(ankleY - shoulderY, height * .48);
+
+  let bottomY = ankleY - bodyHeight * .015;
+  let flare = shoulderWidth * 1.22;
+  if (product.shape === 'straight') {
+    bottomY = Math.min(kneeY + bodyHeight * .24, ankleY);
+    flare = hipWidth * .72;
+  }
+  if (product.shape === 'lehenga') flare = shoulderWidth * 1.6;
+  if (product.shape === 'gown') flare = shoulderWidth * 1.52;
+  if (product.shape === 'anarkali') flare = shoulderWidth * 1.42;
+
+  const shoulderPad = shoulderWidth * .11;
+  const waistY = hipY - (hipY - shoulderY) * .32;
+  const waistWidth = shoulderWidth * .42;
+
+  ctx.beginPath();
+  ctx.moveTo(leftShoulder.x - shoulderPad, leftShoulder.y + shoulderWidth * .05);
+  ctx.quadraticCurveTo(centerX - shoulderWidth * .36, shoulderY - shoulderWidth * .13, centerX, shoulderY - shoulderWidth * .02);
+  ctx.quadraticCurveTo(centerX + shoulderWidth * .36, shoulderY - shoulderWidth * .13, rightShoulder.x + shoulderPad, rightShoulder.y + shoulderWidth * .05);
+  ctx.lineTo(centerX + waistWidth, waistY);
+  ctx.quadraticCurveTo(centerX + hipWidth * .62, hipY, centerX + flare * .5, bottomY);
+  ctx.quadraticCurveTo(centerX, bottomY + shoulderWidth * .1, centerX - flare * .5, bottomY);
+  ctx.quadraticCurveTo(centerX - hipWidth * .62, hipY, centerX - waistWidth, waistY);
+  ctx.closePath();
+
+  return { centerX, shoulderY, shoulderWidth, hipY, waistY, bottomY, flare };
 }
 
-function useWeaveTexture(fabric) {
-  return useMemo(() => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 128;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#777';
-    ctx.fillRect(0, 0, 128, 128);
+function drawSleeves(ctx, landmarks, width, height, color, product) {
+  if (product.shape === 'lehenga') return;
+  const pairs = [[11, 13, 15], [12, 14, 16]];
+  const shoulderWidth = Math.abs(landmarks[11].x - landmarks[12].x) * width;
 
-    const alpha = fabric === 'Velvet' ? .08 : fabric === 'Cotton' ? .24 : .14;
-    ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
-    ctx.lineWidth = 1;
-    for (let i = 0; i < 128; i += 5) {
-      ctx.beginPath();
-      ctx.moveTo(i, 0);
-      ctx.lineTo(i, 128);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(0, i);
-      ctx.lineTo(128, i);
-      ctx.stroke();
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(10, 14);
-    texture.colorSpace = THREE.NoColorSpace;
-    return texture;
-  }, [fabric]);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(shoulderWidth * .24, 18);
+  ctx.shadowColor = 'rgba(32,18,14,.22)';
+  ctx.shadowBlur = shoulderWidth * .06;
+  pairs.forEach(([s, e, w]) => {
+    const shoulder = point(landmarks[s], width, height);
+    const elbow = point(landmarks[e], width, height);
+    const wrist = point(landmarks[w], width, height);
+    ctx.beginPath();
+    ctx.moveTo(shoulder.x, shoulder.y + shoulderWidth * .06);
+    ctx.lineTo(elbow.x, elbow.y);
+    if (product.type !== 'Gown') ctx.lineTo(wrist.x, wrist.y - shoulderWidth * .06);
+    ctx.stroke();
+  });
+  ctx.restore();
 }
 
-function RealModel() {
-  const { scene } = useGLTF(AVATAR_URL);
-  const model = useMemo(() => {
-    const copy = cloneSkeleton(scene);
-    const clothing = /(shirt|blouse|jacket|pants|trouser|jeans|skirt|dress|shoe|boot|cloth|garment|top)/i;
-
-    copy.traverse((object) => {
-      if (!object.isMesh && !object.isSkinnedMesh) return;
-      object.castShadow = true;
-      object.receiveShadow = true;
-
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      const label = `${object.name} ${materials.map((m) => m?.name || '').join(' ')}`;
-
-      // Rocketbox avatars ship with regular clothes. We hide clothing meshes and
-      // keep the real rigged body/head/hair so our atelier garment sits on the model.
-      if (clothing.test(label)) {
-        object.visible = false;
-      }
-    });
-
-    return copy;
-  }, [scene]);
-
-  return <primitive object={model} scale={2.08} position={[0, -2.02, 0]} />;
+function revealArms(ctx, landmarks, width, height) {
+  const shoulderWidth = Math.abs(landmarks[11].x - landmarks[12].x) * width;
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = Math.max(shoulderWidth * .15, 14);
+  [[11, 13, 15], [12, 14, 16]].forEach(([s, e, w]) => {
+    const a = point(landmarks[s], width, height);
+    const b = point(landmarks[e], width, height);
+    const c = point(landmarks[w], width, height);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.stroke();
+  });
+  ctx.restore();
 }
 
-function DressMaterial({ c, side = THREE.FrontSide }) {
-  const weave = useWeaveTexture(c.fabric);
-  const props = fabricProps(c.fabric);
-  return (
-    <meshPhysicalMaterial
-      color={c.color}
-      side={side}
-      bumpMap={weave}
-      bumpScale={c.fabric === 'Cotton' ? .02 : .012}
-      {...props}
-    />
+function renderTryOn(canvas, landmarks, product) {
+  if (!canvas || !landmarks?.length) return;
+  const ctx = canvas.getContext('2d');
+  const { width, height } = canvas;
+  ctx.clearRect(0, 0, width, height);
+
+  const important = [11, 12, 23, 24];
+  if (important.some((index) => (landmarks[index]?.visibility ?? 1) < .35)) return;
+
+  const color = product.color;
+  const geometry = buildGarmentPath(ctx, landmarks, width, height, product);
+  const gradient = ctx.createLinearGradient(
+    geometry.centerX - geometry.flare * .5,
+    geometry.shoulderY,
+    geometry.centerX + geometry.flare * .5,
+    geometry.bottomY,
   );
-}
+  gradient.addColorStop(0, color);
+  gradient.addColorStop(.18, '#ffffff22');
+  gradient.addColorStop(.38, color);
+  gradient.addColorStop(.64, '#00000018');
+  gradient.addColorStop(.82, '#ffffff1f');
+  gradient.addColorStop(1, color);
 
-function skirtProfile(c) {
-  const lengthMap = { Knee: 1.25, Calf: 1.62, Ankle: 1.98, Floor: 2.18 };
-  const hemMap = { 'A-Line': .93, Straight: .58, Flared: 1.12, Fitted: .68 };
-  const h = lengthMap[c.length];
-  const hem = hemMap[c.silhouette];
+  ctx.save();
+  ctx.shadowColor = 'rgba(30,18,14,.28)';
+  ctx.shadowBlur = Math.max(geometry.shoulderWidth * .08, 8);
+  ctx.shadowOffsetY = geometry.shoulderWidth * .035;
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.restore();
 
-  return [
-    new THREE.Vector2(.43, .34),
-    new THREE.Vector2(.46, .15),
-    new THREE.Vector2(.52, -.14),
-    new THREE.Vector2(c.silhouette === 'Fitted' ? .48 : .61, -.46),
-    new THREE.Vector2(c.silhouette === 'Straight' ? .58 : hem * .8, -.82),
-    new THREE.Vector2(hem, .34 - h),
-  ];
-}
+  drawSleeves(ctx, landmarks, width, height, color, product);
 
-function NeckOverlay({ type }) {
-  const common = { color: SKIN, roughness: .62 };
-  if (type === 'V Neck') {
-    return <mesh position={[0, .83, .465]} rotation={[0, 0, Math.PI / 4]} scale={[1, .75, 1]}><boxGeometry args={[.3, .3, .025]} /><meshStandardMaterial {...common} /></mesh>;
-  }
-  if (type === 'Square') {
-    return <mesh position={[0, .86, .465]}><boxGeometry args={[.36, .27, .025]} /><meshStandardMaterial {...common} /></mesh>;
-  }
-  if (type === 'Boat') {
-    return <mesh position={[0, .98, .45]} scale={[1.85, .5, .3]}><sphereGeometry args={[.22, 40, 24]} /><meshStandardMaterial {...common} /></mesh>;
-  }
-  if (type === 'Sweetheart') {
-    return <group position={[0, .83, .463]}><mesh position={[-.1, 0, 0]} scale={[1, .8, .3]}><sphereGeometry args={[.16, 36, 24]} /><meshStandardMaterial {...common} /></mesh><mesh position={[.1, 0, 0]} scale={[1, .8, .3]}><sphereGeometry args={[.16, 36, 24]} /><meshStandardMaterial {...common} /></mesh></group>;
-  }
-  return <mesh position={[0, .94, .46]} scale={[1.25, .68, .3]}><sphereGeometry args={[.2, 40, 24]} /><meshStandardMaterial {...common} /></mesh>;
-}
-
-function Sleeves({ c }) {
-  const lengths = { Sleeveless: 0, Cap: .3, Elbow: .66, '3/4': .92, Full: 1.23 };
-  const length = lengths[c.sleeves];
-  if (!length) return null;
-
-  const y = .55 - length * .23;
-  return (
-    <>
-      <mesh position={[-.58, y, 0]} rotation={[0, 0, -.12]} scale={[1, 1, .72]} castShadow>
-        <cylinderGeometry args={[.19, .145, length, 48, 8, false]} />
-        <DressMaterial c={c} />
-      </mesh>
-      <mesh position={[.58, y, 0]} rotation={[0, 0, .12]} scale={[1, 1, .72]} castShadow>
-        <cylinderGeometry args={[.19, .145, length, 48, 8, false]} />
-        <DressMaterial c={c} />
-      </mesh>
-    </>
+  // Neck opening: reveal the customer's real skin under the garment.
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.beginPath();
+  ctx.ellipse(
+    geometry.centerX,
+    geometry.shoulderY + geometry.shoulderWidth * .025,
+    geometry.shoulderWidth * .18,
+    geometry.shoulderWidth * .15,
+    0,
+    0,
+    Math.PI * 2,
   );
-}
+  ctx.fill();
+  ctx.restore();
 
-function Embellishment({ c }) {
-  if (c.detail === 'Clean') return null;
-  const gold = '#d0ad66';
-
-  if (c.detail === 'Hand embroidery') {
-    return (
-      <group position={[0, .3, .47]}>
-        {Array.from({ length: 17 }).map((_, i) => {
-          const row = Math.floor(i / 5);
-          const col = i % 5;
-          return (
-            <mesh key={i} position={[-.22 + col * .11 + (row % 2 ? .045 : 0), .58 - row * .14, .01]}>
-              <torusGeometry args={[.025 + (i % 3) * .004, .007, 8, 18]} />
-              <meshStandardMaterial color={gold} metalness={.45} roughness={.35} />
-            </mesh>
-          );
-        })}
-      </group>
+  // Fine fabric folds make the overlay read like cloth rather than a flat sticker.
+  ctx.save();
+  ctx.globalAlpha = .18;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = Math.max(1.3, geometry.shoulderWidth * .006);
+  for (let i = -3; i <= 3; i += 1) {
+    const topX = geometry.centerX + i * geometry.shoulderWidth * .075;
+    const endX = geometry.centerX + i * geometry.flare * .105;
+    ctx.beginPath();
+    ctx.moveTo(topX, geometry.waistY);
+    ctx.quadraticCurveTo(
+      geometry.centerX + i * geometry.flare * .06,
+      (geometry.waistY + geometry.bottomY) / 2,
+      endX,
+      geometry.bottomY - geometry.shoulderWidth * .08,
     );
+    ctx.stroke();
   }
+  ctx.restore();
 
-  return (
-    <mesh position={[0, c.length === 'Floor' ? -1.72 : c.length === 'Ankle' ? -1.51 : c.length === 'Calf' ? -1.16 : -.8, 0]} rotation={[Math.PI / 2, 0, 0]} scale={[c.silhouette === 'Flared' ? 1.15 : .95, 1, .8]}>
-      <torusGeometry args={[.72, c.detail === 'Gold border' ? .034 : .022, 12, 72]} />
-      <meshStandardMaterial color={gold} metalness={.42} roughness={.36} />
-    </mesh>
+  // Decorative hem/border varies by product.
+  ctx.save();
+  ctx.strokeStyle = '#d6b477';
+  ctx.globalAlpha = .82;
+  ctx.lineWidth = Math.max(3, geometry.shoulderWidth * .018);
+  ctx.beginPath();
+  ctx.moveTo(geometry.centerX - geometry.flare * .43, geometry.bottomY - geometry.shoulderWidth * .08);
+  ctx.quadraticCurveTo(
+    geometry.centerX,
+    geometry.bottomY + geometry.shoulderWidth * .02,
+    geometry.centerX + geometry.flare * .43,
+    geometry.bottomY - geometry.shoulderWidth * .08,
   );
+  ctx.stroke();
+  ctx.restore();
+
+  // Arms stay in front of the virtual garment, which makes the effect far more natural.
+  revealArms(ctx, landmarks, width, height);
 }
 
-function AtelierDress({ c }) {
-  const profile = useMemo(() => skirtProfile(c), [c.length, c.silhouette]);
-  const torsoScale = c.silhouette === 'Fitted' ? .93 : c.silhouette === 'Straight' ? 1 : 1.04;
+function TryOnStage({ product, onReady }) {
+  const videoRef = useRef(null);
+  const imageRef = useRef(null);
+  const canvasRef = useRef(null);
+  const poseRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const landmarksRef = useRef(null);
+  const lastTimeRef = useRef(-1);
+  const modeRef = useRef('idle');
 
-  return (
-    <group position={[0, .03, .02]}>
-      <mesh position={[0, .48, 0]} scale={[torsoScale, 1, .68]} castShadow>
-        <cylinderGeometry args={[.45, .43, 1.08, 64, 18, false]} />
-        <DressMaterial c={c} />
-      </mesh>
-      <NeckOverlay type={c.neck} />
-      <mesh castShadow receiveShadow>
-        <latheGeometry args={[profile, 96]} />
-        <DressMaterial c={c} side={THREE.DoubleSide} />
-      </mesh>
-      <Sleeves c={c} />
-      <Embellishment c={c} />
-    </group>
-  );
-}
+  const [mode, setModeState] = useState('idle');
+  const [status, setStatus] = useState('Loading body tracking…');
+  const [modelReady, setModelReady] = useState(false);
+  const [photo, setPhoto] = useState('');
+  const [cameraError, setCameraError] = useState('');
 
-function LoadingModel() {
-  return <Html center><div className="real-model-loader"><span />Loading atelier model…</div></Html>;
-}
+  const setMode = (value) => {
+    modeRef.current = value;
+    setModeState(value);
+  };
 
-function Viewer({ c }) {
-  return (
-    <div className="viewer realistic-viewer">
-      <Canvas shadows camera={{ position: [0, .25, 5.6], fov: 31 }} dpr={[1, 1.7]} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}>
-        <color attach="background" args={['#ebe5dc']} />
-        <fog attach="fog" args={['#ebe5dc', 7, 12]} />
-        <ambientLight intensity={.65} />
-        <directionalLight position={[4, 5, 5]} intensity={2.35} castShadow shadow-mapSize-width={2048} shadow-mapSize-height={2048} />
-        <directionalLight position={[-3, 2.5, 2]} intensity={1.1} />
-        <spotLight position={[0, 4, -2]} intensity={1.15} angle={.8} penumbra={1} />
-        <Suspense fallback={<LoadingModel />}>
-          <RealModel />
-          <AtelierDress c={c} />
-          <Environment preset="studio" environmentIntensity={.45} />
-        </Suspense>
-        <ContactShadows position={[0, -2.03, 0]} opacity={.42} scale={5} blur={2.5} far={3} />
-        <OrbitControls enablePan={false} minDistance={3.9} maxDistance={7} target={[0, .2, 0]} minPolarAngle={.78} maxPolarAngle={1.68} />
-      </Canvas>
-      <div className="viewer-tip"><RotateCcw size={13} /> Drag to rotate · scroll to zoom</div>
-      <div className="model-badge"><span /> REAL RIGGED MODEL <small>Rocketbox</small></div>
+  const sizeCanvas = useCallback((width, height) => {
+    if (!canvasRef.current || !width || !height) return;
+    if (canvasRef.current.width !== width) canvasRef.current.width = width;
+    if (canvasRef.current.height !== height) canvasRef.current.height = height;
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+        const landmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: .55,
+          minPosePresenceConfidence: .55,
+          minTrackingConfidence: .55,
+        });
+        if (!alive) {
+          landmarker.close();
+          return;
+        }
+        poseRef.current = landmarker;
+        setModelReady(true);
+        setStatus('Ready for virtual try-on');
+        onReady?.();
+      } catch (error) {
+        console.error(error);
+        setStatus('Body tracking could not load');
+      }
+    })();
+
+    return () => {
+      alive = false;
+      stopCamera();
+      poseRef.current?.close();
+    };
+  }, [onReady, stopCamera]);
+
+  const drawVideo = useCallback(() => {
+    if (modeRef.current !== 'camera') return;
+    const video = videoRef.current;
+    const pose = poseRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !pose || !canvas) return;
+
+    if (video.readyState >= 2 && video.videoWidth && video.currentTime !== lastTimeRef.current) {
+      sizeCanvas(video.videoWidth, video.videoHeight);
+      lastTimeRef.current = video.currentTime;
+      try {
+        const result = pose.detectForVideo(video, performance.now());
+        if (result.landmarks?.[0]) {
+          landmarksRef.current = result.landmarks[0];
+          renderTryOn(canvas, result.landmarks[0], product);
+          const allVisible = [11, 12, 23, 24, 25, 26].every((i) => (result.landmarks[0][i]?.visibility ?? 1) > .45);
+          setStatus(allVisible ? 'Perfect — move naturally' : 'Step back so we can see more of your outfit');
+        } else {
+          canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+          setStatus('Stand in frame to start trying on');
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    rafRef.current = requestAnimationFrame(drawVideo);
+  }, [product, sizeCanvas]);
+
+  const startCamera = useCallback(async () => {
+    if (!modelReady || !poseRef.current) return;
+    stopCamera();
+    setCameraError('');
+    setPhoto('');
+    setStatus('Opening camera…');
+    try {
+      await poseRef.current.setOptions({ runningMode: 'VIDEO' });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      const video = videoRef.current;
+      video.srcObject = stream;
+      await video.play();
+      setMode('camera');
+      lastTimeRef.current = -1;
+      drawVideo();
+    } catch (error) {
+      console.error(error);
+      setMode('idle');
+      setCameraError('Camera access was blocked. You can still upload a full-body photo.');
+      setStatus('Camera unavailable');
+    }
+  }, [drawVideo, modelReady, stopCamera]);
+
+  const usePhoto = useCallback(async (file) => {
+    if (!file || !poseRef.current) return;
+    stopCamera();
+    const url = URL.createObjectURL(file);
+    setPhoto((old) => {
+      if (old) URL.revokeObjectURL(old);
+      return url;
+    });
+    setMode('photo');
+    setStatus('Fitting the dress to your photo…');
+  }, [stopCamera]);
+
+  const detectPhoto = useCallback(async () => {
+    const image = imageRef.current;
+    const pose = poseRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !pose || !canvas || !image.naturalWidth) return;
+    try {
+      await pose.setOptions({ runningMode: 'IMAGE' });
+      sizeCanvas(image.naturalWidth, image.naturalHeight);
+      const result = pose.detect(image);
+      if (result.landmarks?.[0]) {
+        landmarksRef.current = result.landmarks[0];
+        renderTryOn(canvas, result.landmarks[0], product);
+        setStatus('Try-on ready — switch dresses below');
+      } else {
+        setStatus('We could not find a full person in this photo');
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus('Could not process this photo');
+    }
+  }, [product, sizeCanvas]);
+
+  useEffect(() => {
+    if (landmarksRef.current && canvasRef.current) {
+      renderTryOn(canvasRef.current, landmarksRef.current, product);
+    }
+  }, [product]);
+
+  return <div className="tryon-stage">
+    <div className="tryon-media-wrap">
+      {mode === 'camera' && <video ref={videoRef} className="tryon-media mirrored" playsInline muted/>}
+      {mode === 'photo' && photo && <img ref={imageRef} className="tryon-media" src={photo} alt="Your uploaded try-on" onLoad={detectPhoto}/>} 
+      <canvas ref={canvasRef} className={`tryon-overlay ${mode === 'camera' ? 'mirrored' : ''}`}/>
+
+      {mode === 'idle' && <div className="tryon-empty">
+        <div className="tryon-orbit"><ScanLine size={34}/></div>
+        <span className="eyebrow">VIRTUAL FITTING ROOM</span>
+        <h2>See it on <em>you.</em></h2>
+        <p>No avatar. No mannequin. Use your live camera or a full-body photo and try the collection on your own body.</p>
+        <div className="tryon-start-actions">
+          <button className="btn dark" disabled={!modelReady} onClick={startCamera}>
+            {!modelReady ? <LoaderCircle className="spin" size={16}/> : <Camera size={16}/>} {modelReady ? 'Start camera' : 'Loading try-on'}
+          </button>
+          <label className={`btn outline ${!modelReady ? 'disabled' : ''}`}><ImagePlus size={16}/> Upload photo<input type="file" accept="image/*" disabled={!modelReady} onChange={(e) => usePhoto(e.target.files?.[0])}/></label>
+        </div>
+        {cameraError && <small className="camera-error">{cameraError}</small>}
+        <div className="privacy"><ShieldCheck size={14}/><span>Your camera stays in your browser. Frames are not uploaded.</span></div>
+      </div>}
+
+      {mode !== 'idle' && <>
+        <div className="tracking-status"><i/><span>{status}</span></div>
+        <div className="stage-actions">
+          <button onClick={() => { stopCamera(); setMode('idle'); landmarksRef.current = null; canvasRef.current?.getContext('2d').clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); }}><X size={16}/> Close</button>
+          {mode === 'photo' && <label><RefreshCcw size={15}/> Change photo<input type="file" accept="image/*" onChange={(e) => usePhoto(e.target.files?.[0])}/></label>}
+        </div>
+      </>}
     </div>
-  );
+  </div>;
 }
 
-function Choices({ items, value, onPick, neck = false }) {
-  return <div className={`choices ${neck ? 'neck-choices' : ''}`}>{items.map((item) => { const label = typeof item === 'string' ? item : item.name; return <button className={value === label ? 'selected' : ''} onClick={() => onPick(label)} key={label}>{neck && <i className={`neck-shape n-${label.toLowerCase().replace(' ', '-')}`} />}<span>{label}</span>{value === label && <Check size={12} />}</button>; })}</div>;
+export default function Studio({ goHome, addToBag, initialProduct }) {
+  const [product, setProduct] = useState(initialProduct || PRODUCTS[0]);
+  const [size, setSize] = useState('M');
+
+  return <main className="virtual-room">
+    <div className="virtual-topbar">
+      <button onClick={goHome}><ArrowLeft size={16}/> Boutique</button>
+      <div><span>MAISON AARA</span><b>Virtual Try-On</b></div>
+      <div className="desktop"><ShieldCheck size={14}/> Private on-device fitting</div>
+    </div>
+
+    <div className="virtual-layout">
+      <section className="virtual-camera-panel">
+        <TryOnStage product={product}/>
+        <div className="tryon-filmstrip">
+          <div className="filmstrip-head"><div><span className="eyebrow">TRY ANOTHER LOOK</span><b>Switch instantly</b></div><small>{PRODUCTS.length} pieces</small></div>
+          <div className="filmstrip-items">{PRODUCTS.map((item) => <button key={item.id} className={item.id === product.id ? 'active' : ''} onClick={() => setProduct(item)}>
+            <GarmentArt product={item} compact/>
+            <span>{item.name}</span>
+          </button>)}</div>
+        </div>
+      </section>
+
+      <aside className="virtual-product-panel">
+        <span className="eyebrow">NOW TRYING ON</span>
+        <div className="virtual-product-thumb"><GarmentArt product={product}/></div>
+        <div className="virtual-product-title"><div><small>{product.type}</small><h1>{product.name}</h1></div><b>{money(product.price)}</b></div>
+        <p className="virtual-copy">The garment follows your shoulders, waist and body position as you move. Stand far enough back to keep your upper body and hips visible.</p>
+
+        <div className="virtual-size">
+          <div><b>Choose size</b><u>Size guide</u></div>
+          <div>{['XS', 'S', 'M', 'L', 'XL'].map((item) => <button key={item} className={size === item ? 'active' : ''} onClick={() => setSize(item)}>{item}</button>)}</div>
+        </div>
+
+        <button className="btn dark full" onClick={addToBag}>Add to bag <ShoppingBag size={15}/></button>
+        <div className="tryon-benefits">
+          <p><Check size={14}/><span><b>Live body tracking</b><small>Moves with your pose in real time</small></span></p>
+          <p><Sparkles size={14}/><span><b>Instant style switching</b><small>Compare the collection without leaving camera</small></span></p>
+          <p><ShieldCheck size={14}/><span><b>Private by design</b><small>Camera frames stay on your device</small></span></p>
+        </div>
+      </aside>
+    </div>
+  </main>;
 }
-
-function Measurements({ open, close, values, setValues }) {
-  if (!open) return null;
-  const fields = [['Height', 'height', 'cm'], ['Shoulder', 'shoulder', 'in'], ['Bust', 'bust', 'in'], ['Waist', 'waist', 'in'], ['Hip', 'hip', 'in'], ['Sleeve', 'sleeve', 'in'], ['Dress length', 'dressLength', 'in'], ['Armhole', 'armhole', 'in']];
-  return <div className="drawer-bg" onMouseDown={close}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">MADE TO MEASURE</span><h2>Your measurements</h2></div><button onClick={close}><X size={19} /></button></div><div className="measure-visual"><div className="person"><i /><b /><em /></div><span className="m shoulder">Shoulder</span><span className="m bust">Bust</span><span className="m waist">Waist</span><span className="m hip">Hip</span><p>Measure over light clothing. Keep the tape comfortably close, never tight.</p></div><div className="measure-fields">{fields.map(([label, key, unit]) => <label key={key}><span>{label}</span><div><input type="number" value={values[key]} onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))} /><small>{unit}</small></div></label>)}</div><button className="btn dark full" onClick={close}>Save measurements <Check size={15} /></button></aside></div>;
-}
-
-export default function Studio({ goHome, addToBag }) {
-  const [tab, setTab] = useState('Neckline');
-  const [drawer, setDrawer] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [c, setC] = useState({ neck: 'Sweetheart', depth: 7.5, sleeves: '3/4', silhouette: 'A-Line', fabric: 'Chanderi', color: '#6E2636', length: 'Ankle', detail: 'Gold border' });
-  const [measurements, setMeasurements] = useState({ height: 165, shoulder: 15, bust: 36, waist: 30, hip: 39, sleeve: 18, dressLength: 52, armhole: 16 });
-  const tabs = ['Silhouette', 'Neckline', 'Sleeves', 'Fabric', 'Colour', 'Length', 'Details'];
-  const set = (key, value) => setC((x) => ({ ...x, [key]: value }));
-  const total = useMemo(() => 3990 + (FABRICS.find((f) => f.name === c.fabric)?.price || 0) + (DETAILS.find((d) => d.name === c.detail)?.price || 0) + (c.sleeves === 'Full' ? 350 : c.sleeves === '3/4' ? 250 : 0) + 500, [c]);
-
-  return <main className="studio"><div className="studio-bar"><button onClick={goHome}><ArrowLeft size={16} /> Boutique</button><div><span>DESIGN STUDIO</span><b>Aaira Anarkali</b></div><div><button onClick={() => setSaved(!saved)}><Heart size={16} fill={saved ? 'currentColor' : 'none'} /> {saved ? 'Saved' : 'Save'}</button><button>Share</button></div></div>
-    <div className="studio-grid"><aside className="controls"><div className="control-title"><span className="eyebrow">CUSTOMIZE</span><h2>Make it yours.</h2><p>Every choice updates your design instantly on a real human avatar.</p></div><div className="tabs">{tabs.map((t) => <button className={tab === t ? 'active' : ''} onClick={() => setTab(t)} key={t}>{t}<ChevronDown size={14} /></button>)}</div><div className="panel">
-      {tab === 'Silhouette' && <Choices items={SILHOUETTES} value={c.silhouette} onPick={(v) => set('silhouette', v)} />} {tab === 'Neckline' && <><div className="panel-label"><b>Front neckline</b><span>{c.neck}</span></div><Choices items={NECKS} value={c.neck} onPick={(v) => set('neck', v)} neck /><div className="range"><div className="panel-label"><b>Neck depth</b><span>{c.depth}"</span></div><input type="range" min="4" max="12" step=".5" value={c.depth} onChange={(e) => set('depth', Number(e.target.value))} /><small><span>Modest</span><span>Deep</span></small></div></>}
-      {tab === 'Sleeves' && <Choices items={SLEEVES} value={c.sleeves} onPick={(v) => set('sleeves', v)} />} {tab === 'Fabric' && <div className="fabrics">{FABRICS.map((f) => <button className={c.fabric === f.name ? 'selected' : ''} onClick={() => set('fabric', f.name)} key={f.name}><i className={`fabric ${f.name.toLowerCase()}`} /><b>{f.name}</b><small>{f.detail}</small>{f.price > 0 && <em>+{money(f.price)}</em>}</button>)}</div>}
-      {tab === 'Colour' && <><div className="panel-label"><b>Designer palette</b><span>{COLORS.find((x) => x.hex === c.color)?.name || 'Custom'}</span></div><div className="color-list">{COLORS.map((x) => <button className={c.color === x.hex ? 'selected' : ''} onClick={() => set('color', x.hex)} key={x.name}><i style={{ background: x.hex }} />{x.name}{c.color === x.hex && <Check size={11} />}</button>)}</div><label className="color-picker">Custom colour<input type="color" value={c.color} onChange={(e) => set('color', e.target.value)} /></label></>}
-      {tab === 'Length' && <Choices items={LENGTHS} value={c.length} onPick={(v) => set('length', v)} />} {tab === 'Details' && <Choices items={DETAILS} value={c.detail} onPick={(v) => set('detail', v)} />}</div><button className="measure-btn" onClick={() => setDrawer(true)}><div><Sparkles size={15} /><span><b>Made to measure</b><small>Your custom fit is active</small></span></div><ArrowRight size={15} /></button></aside>
-      <section className="viewer-area"><Viewer c={c} /><div className="mobile-tabs">{tabs.slice(0, 5).map((t) => <button className={tab === t ? 'active' : ''} onClick={() => setTab(t)} key={t}>{t}</button>)}</div></section>
-      <aside className="summary"><span className="eyebrow">YOUR DESIGN</span><h2>Aaira Anarkali</h2><p>One-of-one configuration</p><div className="tags"><span>{c.silhouette}</span><span>{c.neck}</span><span>{c.sleeves}</span><span>{c.fabric}</span><span>{c.length}</span></div><div className="breakdown"><p><span>Base garment</span><b>{money(3990)}</b></p><p><span>{c.fabric}</span><b>+{money(FABRICS.find((f) => f.name === c.fabric)?.price || 0)}</b></p>{c.detail !== 'Clean' && <p><span>{c.detail}</span><b>+{money(DETAILS.find((d) => d.name === c.detail)?.price || 0)}</b></p>}<p><span>Custom measurements</span><b>+{money(500)}</b></p></div><div className="total"><span>Estimated total<small>Inclusive of taxes</small></span><b>{money(total)}</b></div><button className="btn dark full" onClick={addToBag}>Add custom design <ShoppingBag size={15} /></button><button className="btn outline full" onClick={() => setSaved(!saved)}><Heart size={15} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved to My Atelier' : 'Save to My Atelier'}</button><div className="delivery"><b>◷</b><span><strong>Crafted in 10–14 days</strong><br />Final fit is reviewed before production.</span></div></aside>
-    </div><Measurements open={drawer} close={() => setDrawer(false)} values={measurements} setValues={setMeasurements} /></main>;
-}
-
-useGLTF.preload(AVATAR_URL);
