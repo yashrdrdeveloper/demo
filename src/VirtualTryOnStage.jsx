@@ -87,11 +87,15 @@ async function createSkinSegmenter(vision) {
   }
 }
 
-function segmentStillImage(segmenter, image) {
+function segmentStillImage(segmenter, image, landmarks) {
   return timeout(new Promise((resolve, reject) => {
     try {
-      const maybeResult = segmenter.segment(image, (result) => resolve(result));
-      if (maybeResult?.categoryMask) resolve(maybeResult);
+      segmenter.segment(image, (result) => {
+        resolve({
+          skinMask: createSkinMaskCanvas(result.categoryMask),
+          personRegion: analyzePersonMask(result.categoryMask, landmarks),
+        });
+      });
     } catch (error) {
       reject(error);
     }
@@ -127,6 +131,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
   const lastPersonRegionRef = useRef(null);
   const stableStateRef = useRef(null);
   const orientationVoteRef = useRef({ value: 'front', count: 0 });
+  const coverageVoteRef = useRef({ value: 'none', count: 0 });
   const lastVideoTimeRef = useRef(-1);
   const lastPoseAtRef = useRef(0);
   const lastSegmentAtRef = useRef(0);
@@ -160,6 +165,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     if (next.state === 'searching') {
       stableStateRef.current = next;
       orientationVoteRef.current = { value: next.orientation || 'front', count: 0 };
+      coverageVoteRef.current = { value: next.coverage || 'none', count: 0 };
       return next;
     }
 
@@ -177,12 +183,26 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       orientationVoteRef.current = { value: next.orientation, count: 1 };
     }
 
+    let coverage = previous?.coverage || next.coverage || 'torso';
+    if (next.coverage === coverage) {
+      coverageVoteRef.current = { value: coverage, count: 0 };
+    } else if (coverageVoteRef.current.value === next.coverage) {
+      coverageVoteRef.current.count += 1;
+      if (coverageVoteRef.current.count >= 4) {
+        coverage = next.coverage;
+        coverageVoteRef.current = { value: coverage, count: 0 };
+      }
+    } else {
+      coverageVoteRef.current = { value: next.coverage, count: 1 };
+    }
+
     const visibleBottom = previous?.visibleBottom
       ? previous.visibleBottom * .68 + next.visibleBottom * .32
       : next.visibleBottom;
     const stable = {
       ...next,
       orientation,
+      coverage,
       visibleBottom,
       quality: previous?.quality ? previous.quality * .35 + next.quality * .65 : next.quality,
     };
@@ -304,7 +324,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
 
   const updateSegmentation = useCallback((source, now) => {
     const segmenter = segmenterRef.current;
-    if (!segmenter || segmentBusyRef.current || now - lastSegmentAtRef.current < 110) return;
+    if (!segmenter || segmentBusyRef.current || now - lastSegmentAtRef.current < 240) return;
     segmentBusyRef.current = true;
     lastSegmentAtRef.current = now;
     try {
@@ -351,6 +371,8 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
           lastSkinMaskRef.current = null;
           lastPersonRegionRef.current = null;
           stableStateRef.current = null;
+          orientationVoteRef.current = { value: 'front', count: 0 };
+          coverageVoteRef.current = { value: 'none', count: 0 };
           setFitState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
           setStatus('Step into the frame — tracking will lock automatically');
           clearFrame();
@@ -373,6 +395,8 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     lastSkinMaskRef.current = null;
     lastPersonRegionRef.current = null;
     stableStateRef.current = null;
+    orientationVoteRef.current = { value: 'front', count: 0 };
+    coverageVoteRef.current = { value: 'none', count: 0 };
   }, []);
 
   const startCamera = useCallback(async () => {
@@ -444,9 +468,9 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       if (segmenterRef.current) {
         try {
           await segmenterRef.current.setOptions({ runningMode: 'IMAGE' });
-          const segmentationResult = await segmentStillImage(segmenterRef.current, image);
-          lastSkinMaskRef.current = createSkinMaskCanvas(segmentationResult.categoryMask);
-          lastPersonRegionRef.current = analyzePersonMask(segmentationResult.categoryMask, detected);
+          const segmented = await segmentStillImage(segmenterRef.current, image, detected);
+          lastSkinMaskRef.current = segmented.skinMask;
+          lastPersonRegionRef.current = segmented.personRegion;
         } catch (error) {
           console.warn('Photo pixel segmentation unavailable; using landmark visibility.', error);
         }
@@ -465,11 +489,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
   const reset = useCallback(() => {
     stopCamera();
     setModeSafe('idle');
-    lastPoseRef.current = null;
-    lastSkinMaskRef.current = null;
-    lastPersonRegionRef.current = null;
     sourceImageRef.current = null;
-    stableStateRef.current = null;
     clearFrame();
     setFitState({ state: 'searching', orientation: 'front', coverage: 'none', quality: 0 });
     setStatus(engine === 'ready' ? 'Ready — start the camera or upload a photo' : 'Preparing automatic body tracking…');
