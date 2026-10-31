@@ -3,6 +3,8 @@ export const COLORS = [
   ['Midnight', '#232A3A'], ['Emerald', '#235A4A'], ['Champagne', '#C5A77B'], ['Ivory', '#E9E0D0'],
 ].map(([name, hex]) => ({ name, hex }));
 
+export const SIZES = ['XS', 'S', 'M', 'L', 'XL'];
+
 export const PRODUCTS = [
   {
     id: 1,
@@ -15,16 +17,10 @@ export const PRODUCTS = [
     badge: 'Exact garment demo',
     fabric: 'Cotton jersey',
     fitNote: 'The exact shirt artwork is preserved during fitting',
+    sizes: SIZES,
     photoUrl: 'https://upload.wikimedia.org/wikipedia/commons/f/fe/Wikipedia_25_Tshirt_white_%28front%29.png',
     tryOnAsset: 'https://upload.wikimedia.org/wikipedia/commons/f/fe/Wikipedia_25_Tshirt_white_%28front%29.png',
     sourceLabel: 'Wikipedia 25 T-shirt · Wikimedia Commons · CC BY-SA 4.0',
-    sizeChart: {
-      XS: { chest: 86, waist: 80 },
-      S: { chest: 92, waist: 86 },
-      M: { chest: 100, waist: 94 },
-      L: { chest: 108, waist: 102 },
-      XL: { chest: 116, waist: 110 },
-    },
   },
   {
     id: 2,
@@ -37,6 +33,7 @@ export const PRODUCTS = [
     badge: 'Boutique example',
     fabric: 'Kanchipuram silk',
     fitNote: 'Use your boutique saree cutout/transparent asset for exact drape placement',
+    sizes: SIZES,
     photoUrl: 'https://upload.wikimedia.org/wikipedia/commons/1/12/Silk_saree_2.jpg',
     sourceLabel: 'Silk saree 2 · Wikimedia Commons · CC BY-SA 4.0',
   },
@@ -51,15 +48,9 @@ export const PRODUCTS = [
     badge: 'Boutique example',
     fabric: 'Textured jersey',
     fitNote: 'Upload the exact isolated one-piece asset for deterministic fitting',
+    sizes: SIZES,
     photoUrl: 'https://upload.wikimedia.org/wikipedia/commons/a/a4/Red-Dress.jpg',
     sourceLabel: 'Red-Dress · Wikimedia Commons',
-    sizeChart: {
-      XS: { chest: 84, waist: 66, hip: 90 },
-      S: { chest: 88, waist: 70, hip: 94 },
-      M: { chest: 94, waist: 76, hip: 100 },
-      L: { chest: 100, waist: 82, hip: 106 },
-      XL: { chest: 108, waist: 90, hip: 114 },
-    },
   },
   {
     id: 4,
@@ -72,6 +63,7 @@ export const PRODUCTS = [
     badge: 'Boutique example',
     fabric: 'Silk · chiffon · beadwork',
     fitNote: 'Best with a transparent front garment asset from your catalog photoshoot',
+    sizes: SIZES,
     photoUrl: 'https://upload.wikimedia.org/wikipedia/commons/1/14/Red_dress%2C_Jewels_exhibition%2C_Hermitage_Amsterdam.jpg',
     sourceLabel: 'Evening Dress · Hermitage/Wikimedia Commons',
   },
@@ -86,6 +78,7 @@ export const PRODUCTS = [
     badge: 'Boutique example',
     fabric: 'Cotton blend embroidery',
     fitNote: 'Exact kurti artwork can be fitted when supplied as a transparent front asset',
+    sizes: SIZES,
     photoUrl: 'https://upload.wikimedia.org/wikipedia/commons/6/67/Indian_woman_wearing_a_kurti.jpg',
     sourceLabel: 'Indian woman wearing a kurti · Wikimedia Commons · CC BY-SA 4.0',
   },
