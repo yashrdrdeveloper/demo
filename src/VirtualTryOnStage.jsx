@@ -1,5 +1,5 @@
 import { FilesetResolver, ImageSegmenter, PoseLandmarker } from '@mediapipe/tasks-vision';
-import { Camera, Check, ImagePlus, LoaderCircle, RefreshCcw, RotateCcw, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { Camera, ImagePlus, LoaderCircle, RefreshCcw, RotateCcw, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
@@ -41,7 +41,7 @@ async function resolveVision() {
   let lastError;
   for (const source of WASM_SOURCES) {
     try {
-      return await timeout(FilesetResolver.forVisionTasks(source), 9000, 'Vision runtime');
+      return await timeout(FilesetResolver.forVisionTasks(source), 6500, 'Vision runtime');
     } catch (error) {
       lastError = error;
     }
@@ -60,12 +60,12 @@ async function createPoseTracker(vision) {
     outputSegmentationMasks: false,
   };
   try {
-    return await timeout(PoseLandmarker.createFromOptions(vision, base), 12000, 'Body tracker');
+    return await timeout(PoseLandmarker.createFromOptions(vision, base), 8500, 'Body tracker');
   } catch {
     return timeout(PoseLandmarker.createFromOptions(vision, {
       ...base,
       baseOptions: { modelAssetPath: POSE_MODEL },
-    }), 12000, 'Body tracker fallback');
+    }), 7000, 'Body tracker fallback');
   }
 }
 
@@ -77,12 +77,12 @@ async function createSkinSegmenter(vision) {
     outputConfidenceMasks: false,
   };
   try {
-    return await timeout(ImageSegmenter.createFromOptions(vision, base), 9000, 'Skin segmentation');
+    return await timeout(ImageSegmenter.createFromOptions(vision, base), 7000, 'Skin segmentation');
   } catch {
     return timeout(ImageSegmenter.createFromOptions(vision, {
       ...base,
       baseOptions: { modelAssetPath: SEGMENT_MODEL },
-    }), 9000, 'Skin segmentation fallback');
+    }), 6000, 'Skin segmentation fallback');
   }
 }
 
@@ -103,9 +103,11 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
   const lastPoseAtRef = useRef(0);
   const lastSegmentAtRef = useRef(0);
   const segmentBusyRef = useRef(false);
+  const segmentLoadingRef = useRef(false);
   const modeRef = useRef('idle');
   const productRef = useRef(product);
   const sizeRef = useRef(size);
+  const mountedRef = useRef(true);
 
   const [mode, setMode] = useState('idle');
   const [engine, setEngine] = useState('loading');
@@ -141,39 +143,60 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
   }, []);
 
   const initSegmentation = useCallback(async () => {
-    if (segmenterRef.current || segmentation === 'loading' || !visionRef.current) return;
-    setSegmentation('loading');
+    if (segmenterRef.current || segmentLoadingRef.current || !visionRef.current) return;
+    segmentLoadingRef.current = true;
+    if (mountedRef.current) setSegmentation('loading');
     try {
       segmenterRef.current = await createSkinSegmenter(visionRef.current);
-      setSegmentation('ready');
+      if (mountedRef.current) setSegmentation('ready');
     } catch (error) {
       console.warn('Skin segmentation unavailable; using pose occlusion fallback.', error);
-      setSegmentation('fallback');
+      if (mountedRef.current) setSegmentation('fallback');
+    } finally {
+      segmentLoadingRef.current = false;
     }
-  }, [segmentation]);
+  }, []);
 
   const initialize = useCallback(async () => {
     setEngine('loading');
     setStatus('Preparing automatic body tracking…');
     try {
       poseRef.current?.close?.();
+      segmenterRef.current?.close?.();
       poseRef.current = null;
-      const vision = await resolveVision();
-      visionRef.current = vision;
-      poseRef.current = await createPoseTracker(vision);
+      segmenterRef.current = null;
+      segmentLoadingRef.current = false;
+      setSegmentation('idle');
+
+      const setup = (async () => {
+        const vision = await resolveVision();
+        visionRef.current = vision;
+        const pose = await createPoseTracker(vision);
+        return { vision, pose };
+      })();
+      const { pose } = await timeout(setup, 20000, 'Tracker setup');
+      if (!mountedRef.current) {
+        pose.close?.();
+        return;
+      }
+      poseRef.current = pose;
       setEngine('ready');
       setStatus('Ready — start the camera or upload a photo');
-      window.setTimeout(() => initSegmentation(), 50);
+      window.setTimeout(() => initSegmentation(), 80);
     } catch (error) {
       console.error(error);
-      setEngine('error');
-      setStatus('Tracker could not load. Check your connection and retry.');
+      if (mountedRef.current) {
+        setEngine('error');
+        setStatus('Tracker could not load in time. Check your connection and retry.');
+      }
     }
   }, [initSegmentation]);
 
   useEffect(() => {
+    mountedRef.current = true;
     initialize();
     return () => {
+      mountedRef.current = false;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       poseRef.current?.close?.();
@@ -203,7 +226,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       }
     })();
     return () => { active = false; };
-  }, [product, render]);
+  }, [product, render, fitState]);
 
   useEffect(() => {
     sizeRef.current = size;
@@ -213,19 +236,19 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
     }
   }, [size, fitState, render]);
 
-  const updateSegmentation = useCallback((source, now, drawSource) => {
+  const updateSegmentation = useCallback((source, now) => {
     const segmenter = segmenterRef.current;
     if (!segmenter || segmentation !== 'ready' || segmentBusyRef.current || now - lastSegmentAtRef.current < 110) return;
     segmentBusyRef.current = true;
     lastSegmentAtRef.current = now;
     try {
-      if (modeRef.current === 'camera') {
-        segmenter.segmentForVideo(source, now, (result) => {
-          lastSkinMaskRef.current = createSkinMaskCanvas(result.categoryMask);
-          segmentBusyRef.current = false;
-          if (lastPoseRef.current) render(source, lastPoseRef.current, analyzePose(lastPoseRef.current), drawSource);
-        });
-      }
+      segmenter.segmentForVideo(source, now, (result) => {
+        lastSkinMaskRef.current = createSkinMaskCanvas(result.categoryMask);
+        segmentBusyRef.current = false;
+        if (lastPoseRef.current && modeRef.current === 'camera') {
+          render(source, lastPoseRef.current, analyzePose(lastPoseRef.current), false);
+        }
+      });
     } catch (error) {
       console.warn('Segmentation frame skipped.', error);
       segmentBusyRef.current = false;
@@ -251,7 +274,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
           setFitState(nextState);
           setStatus(nextState.message);
           render(video, smoothed, nextState, false);
-          updateSegmentation(video, now, false);
+          updateSegmentation(video, now);
         } else {
           lastPoseRef.current = null;
           lastSkinMaskRef.current = null;
@@ -279,6 +302,10 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
 
   const startCamera = useCallback(async () => {
     if (engine !== 'ready' || !poseRef.current) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus('This browser does not support camera access. Upload a photo instead.');
+      return;
+    }
     stopCamera();
     setStatus('Opening camera…');
     setFitState({ state: 'searching', mode: 'none', quality: 0 });
@@ -372,7 +399,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
         <div className="auto-icon"><Sparkles size={32}/></div>
         <span className="eyebrow">AUTOMATIC SAREE TRY-ON</span>
         <h2>No setup.<br/><em>Just step in.</em></h2>
-        <p>The camera finds your shoulders, waist, hips and legs automatically. Stand farther back for a full saree, or use a closer selfie for an upper-body pallu preview.</p>
+        <p>The camera finds your shoulders, hips and legs automatically. Stand farther back for the full saree, or use a closer selfie for the blouse and pallu preview.</p>
         {engine === 'error' ? <button className="btn dark" onClick={initialize}><RefreshCcw size={16}/> Retry tracker</button> : <div className="auto-start-actions">
           <button className="btn dark" disabled={!ready} onClick={startCamera}>{ready ? <Camera size={16}/> : <LoaderCircle className="spin" size={16}/>} {ready ? 'Start live try-on' : 'Preparing tracker'}</button>
           <label className={`btn outline ${!ready ? 'disabled' : ''}`}><ImagePlus size={16}/> Upload photo<input type="file" accept="image/*" disabled={!ready} onChange={(event) => handlePhoto(event.target.files?.[0])}/></label>
@@ -382,7 +409,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
 
       {mode !== 'idle' && <>
         <div className={`auto-status ${fitState.state}`}>
-          <i className={locked ? 'lock-dot' : ''}/><span><b>{status}</b><small>{locked ? (fitState.mode === 'full' ? 'Full saree · live' : 'Selfie / upper-body preview') : 'The fit will recover automatically when you are visible'}</small></span>
+          <i className={locked ? 'lock-dot' : ''}/><span><b>{status}</b><small>{locked ? (fitState.mode === 'full' ? 'Full saree · live' : 'Selfie / upper-body preview') : 'The fit re-locks automatically when your body is visible'}</small></span>
         </div>
         <div className="quality-meter"><span style={{ width: `${Math.max(8, Math.round((fitState.quality || 0) * 100))}%` }}/></div>
         <div className="auto-actions">
@@ -395,7 +422,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
 
     <div className="auto-footnote">
       <b>{fabricReady ? 'Real fabric pixels loaded' : 'Fabric fallback active'}</b>
-      <span>{segmentation === 'ready' ? 'Skin/arm occlusion enhanced.' : 'Pose-based arm occlusion active.'} Tracking automatically reacquires if you leave and re-enter frame.</span>
+      <span>{segmentation === 'ready' ? 'Skin/arm occlusion enhanced.' : 'Pose-based arm occlusion active.'} Tracking automatically reacquires after temporary loss.</span>
     </div>
   </div>;
 }
