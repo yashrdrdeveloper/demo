@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, Ruler, ShieldCheck, ShoppingBag, Shirt } from 'lucide-react';
+import { ArrowLeft, Check, Ruler, ShieldCheck, ShoppingBag, Shirt, Video } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import GarmentArt from './GarmentArt';
@@ -36,8 +36,8 @@ export default function Studio({ goHome, addToBag, initialProduct }) {
   return <main className="virtual-room nonai-room">
     <div className="virtual-topbar">
       <button onClick={goHome}><ArrowLeft size={16}/> Boutique</button>
-      <div><span>MAISON AARA</span><b>Virtual Trial Room</b></div>
-      <div className="desktop"><ShieldCheck size={14}/> No AI · deterministic fitting</div>
+      <div><span>MAISON AARA</span><b>Live Trial Room</b></div>
+      <div className="desktop"><ShieldCheck size={14}/> No generative AI · classic CV tracking</div>
     </div>
 
     <div className="virtual-layout">
@@ -73,9 +73,10 @@ export default function Studio({ goHome, addToBag, initialProduct }) {
 
         <button className="btn dark full" onClick={addToBag}>Add {product.type.toLowerCase()} to bag <ShoppingBag size={15}/></button>
         <div className="tryon-benefits">
+          <p><Video size={14}/><span><b>Live movement tracking</b><small>Manual body anchors follow frame-to-frame with classic optical flow</small></span></p>
           <p><Shirt size={14}/><span><b>Exact garment pixels</b><small>Logo, print, embroidery and garment edges come from the SKU asset</small></span></p>
-          <p><Ruler size={14}/><span><b>Measurement-based fit</b><small>No inferred body dimensions; the customer supplies real measurements</small></span></p>
-          <p><ShieldCheck size={14}/><span><b>No AI</b><small>No body model, generative image or pose model is used</small></span></p>
+          <p><Ruler size={14}/><span><b>Measurement-based fit</b><small>Actual customer measurements drive size recommendation</small></span></p>
+          <p><ShieldCheck size={14}/><span><b>No generative AI</b><small>No generated person, generated garment or pose model is used</small></span></p>
         </div>
       </aside>
     </div>
