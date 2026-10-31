@@ -172,7 +172,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
         const vision = await resolveVision();
         visionRef.current = vision;
         const pose = await createPoseTracker(vision);
-        return { vision, pose };
+        return { pose };
       })();
       const { pose } = await timeout(setup, 20000, 'Tracker setup');
       if (!mountedRef.current) {
@@ -217,7 +217,8 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
         setFabricReady(true);
         if (lastPoseRef.current) {
           const source = modeRef.current === 'camera' ? videoRef.current : sourceImageRef.current;
-          render(source, lastPoseRef.current, fitState, modeRef.current === 'photo');
+          const currentState = analyzePose(lastPoseRef.current);
+          render(source, lastPoseRef.current, currentState, modeRef.current === 'photo');
         }
       } catch (error) {
         console.warn('Fabric texture could not load; renderer will use a fallback tone.', error);
@@ -226,19 +227,20 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       }
     })();
     return () => { active = false; };
-  }, [product, render, fitState]);
+  }, [product, render]);
 
   useEffect(() => {
     sizeRef.current = size;
     if (lastPoseRef.current) {
       const source = modeRef.current === 'camera' ? videoRef.current : sourceImageRef.current;
-      render(source, lastPoseRef.current, fitState, modeRef.current === 'photo');
+      const currentState = analyzePose(lastPoseRef.current);
+      render(source, lastPoseRef.current, currentState, modeRef.current === 'photo');
     }
-  }, [size, fitState, render]);
+  }, [size, render]);
 
   const updateSegmentation = useCallback((source, now) => {
     const segmenter = segmenterRef.current;
-    if (!segmenter || segmentation !== 'ready' || segmentBusyRef.current || now - lastSegmentAtRef.current < 110) return;
+    if (!segmenter || segmentBusyRef.current || now - lastSegmentAtRef.current < 110) return;
     segmentBusyRef.current = true;
     lastSegmentAtRef.current = now;
     try {
@@ -253,7 +255,7 @@ export default function VirtualTryOnStage({ product, size = 'M' }) {
       console.warn('Segmentation frame skipped.', error);
       segmentBusyRef.current = false;
     }
-  }, [render, segmentation]);
+  }, [render]);
 
   const cameraLoop = useCallback(() => {
     const video = videoRef.current;
