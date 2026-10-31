@@ -16,20 +16,23 @@ function Header({ go, cart, tryOn }) {
 export default function App() {
   const [page, setPage] = useState('home');
   const [product, setProduct] = useState(PRODUCTS[0]);
+  const [selectedSize, setSelectedSize] = useState('M');
   const [cart, setCart] = useState(0);
   const [toast, setToast] = useState(false);
+
   const go = (next) => { setPage(next); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const openTryOn = (selected) => {
+  const openTryOn = (selected, size = 'M') => {
     if (selected) setProduct(selected);
+    setSelectedSize(size);
     go('studio');
   };
   const add = () => { setCart((value) => value + 1); setToast(true); window.setTimeout(() => setToast(false), 2500); };
 
   return <div>
-    {page !== 'studio' && <Header go={go} cart={cart} tryOn={() => openTryOn(product)}/>} 
+    {page !== 'studio' && <Header go={go} cart={cart} tryOn={() => openTryOn(product, selectedSize)}/>} 
     {page === 'home' && <Home openProduct={(selected) => { setProduct(selected); go('product'); }} openStudio={openTryOn}/>} 
     {page === 'product' && <Product product={product} goBack={() => go('home')} openStudio={openTryOn} addToBag={add}/>} 
-    {page === 'studio' && <Studio goHome={() => go('home')} addToBag={add} initialProduct={product}/>} 
+    {page === 'studio' && <Studio goHome={() => go('home')} addToBag={add} initialProduct={product} initialSize={selectedSize}/>} 
     {page !== 'studio' && <footer><Logo light/><div><span>Private atelier</span><span>Crafted in India</span><span>Virtual try-on</span></div><small>Prototype experience · Maison Aara</small></footer>} 
     {toast && <div className="toast"><Check size={16}/><span><b>Added to your bag</b><small>{cart} item{cart !== 1 ? 's' : ''} ready</small></span><button onClick={() => setToast(false)}><X size={15}/></button></div>}
   </div>;
