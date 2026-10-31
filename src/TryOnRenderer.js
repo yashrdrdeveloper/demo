@@ -214,9 +214,24 @@ export function drawExactGarment(ctx, garment, bounds, anchors, garmentType = 'f
   const bottom = bounds.y + bounds.height;
 
   if (garmentType === 'top') {
+    // Shoulder calibration marks the person's shoulders, not the outer sleeve edges.
+    // Preserve the real T-shirt silhouette by allowing the sleeve pixels to extend beyond the body shoulders.
+    const shoulderSpan = Math.max(20, Math.abs(shoulderR.x - shoulderL.x));
+    const topL = {
+      x: shoulderL.x - shoulderSpan * 0.30,
+      y: shoulderL.y - shoulderSpan * 0.035,
+    };
+    const topR = {
+      x: shoulderR.x + shoulderSpan * 0.30,
+      y: shoulderR.y - shoulderSpan * 0.035,
+    };
+    const waistOuterL = { x: waistL.x - shoulderSpan * 0.07, y: waistL.y };
+    const waistOuterR = { x: waistR.x + shoulderSpan * 0.07, y: waistR.y };
+    const hipOuterL = { x: hipL.x - shoulderSpan * 0.05, y: hipL.y };
+    const hipOuterR = { x: hipR.x + shoulderSpan * 0.05, y: hipR.y };
     const yMid = top + bounds.height * 0.52;
-    drawBand(ctx, garment, { x0, y0: top, x1, y1: yMid }, [shoulderL, shoulderR, waistR, waistL]);
-    drawBand(ctx, garment, { x0, y0: yMid, x1, y1: bottom }, [waistL, waistR, hipR, hipL]);
+    drawBand(ctx, garment, { x0, y0: top, x1, y1: yMid }, [topL, topR, waistOuterR, waistOuterL]);
+    drawBand(ctx, garment, { x0, y0: yMid, x1, y1: bottom }, [waistOuterL, waistOuterR, hipOuterR, hipOuterL]);
     return;
   }
 
