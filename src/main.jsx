@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 
 import App from './App';
 import './styles.css';
-import './realistic-model.css';
+import './tryon.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
