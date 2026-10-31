@@ -1,287 +1,190 @@
-import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
-import { Camera, ImagePlus, LoaderCircle, RefreshCcw, ScanLine, ShieldCheck, X } from 'lucide-react';
+import { Check, ImagePlus, RefreshCcw, Shirt, Upload, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { drawTryOn, preloadGarmentTexture } from './TryOnRenderer';
+import { CALIBRATION_STEPS, detectVisibleBounds, renderTryOn } from './TryOnRenderer';
 
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
-const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
-
-async function createLandmarker(vision) {
-  const options = {
-    baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
-    runningMode: 'VIDEO',
-    numPoses: 1,
-    minPoseDetectionConfidence: .55,
-    minPosePresenceConfidence: .55,
-    minTrackingConfidence: .55,
-  };
-
-  try {
-    return await PoseLandmarker.createFromOptions(vision, options);
-  } catch (gpuError) {
-    console.warn('GPU body tracking unavailable; falling back to CPU.', gpuError);
-    return PoseLandmarker.createFromOptions(vision, {
-      ...options,
-      baseOptions: { modelAssetPath: MODEL_URL },
-    });
-  }
+function loadImage(src, crossOrigin = false) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    if (crossOrigin) image.crossOrigin = 'anonymous';
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
 }
 
 export default function VirtualTryOnStage({ product }) {
-  const videoRef = useRef(null);
-  const imageRef = useRef(null);
   const canvasRef = useRef(null);
-  const poseRef = useRef(null);
-  const streamRef = useRef(null);
-  const rafRef = useRef(null);
-  const landmarksRef = useRef(null);
-  const productRef = useRef(product);
-  const photoUrlRef = useRef('');
-  const lastVideoTimeRef = useRef(-1);
-  const lastDetectRef = useRef(0);
-  const modeRef = useRef('idle');
-  const statusRef = useRef('Loading body tracking…');
+  const personRef = useRef(null);
+  const garmentRef = useRef(null);
+  const personObjectUrlRef = useRef('');
+  const garmentObjectUrlRef = useRef('');
 
-  const [mode, setModeState] = useState('idle');
-  const [status, setStatus] = useState('Loading body tracking…');
-  const [ready, setReady] = useState(false);
-  const [photo, setPhoto] = useState('');
-  const [cameraError, setCameraError] = useState('');
+  const [personReady, setPersonReady] = useState(false);
+  const [garmentReady, setGarmentReady] = useState(false);
+  const [garmentBounds, setGarmentBounds] = useState(null);
+  const [anchors, setAnchors] = useState({});
+  const [step, setStep] = useState(0);
+  const [calibrating, setCalibrating] = useState(false);
+  const [message, setMessage] = useState('Upload a full-body photo to begin.');
+  const [customGarment, setCustomGarment] = useState(false);
 
-  const setMode = useCallback((next) => {
-    modeRef.current = next;
-    setModeState(next);
-  }, []);
+  const redraw = useCallback(() => {
+    renderTryOn({
+      canvas: canvasRef.current,
+      person: personRef.current,
+      garment: garmentRef.current,
+      bounds: garmentBounds,
+      anchors,
+      garmentType: product.garmentType,
+      showCalibration: calibrating,
+      activeStep: step,
+    });
+  }, [anchors, calibrating, garmentBounds, product.garmentType, step]);
 
-  const updateStatus = useCallback((next) => {
-    if (statusRef.current === next) return;
-    statusRef.current = next;
-    setStatus(next);
-  }, []);
-
-  const sizeCanvas = useCallback((width, height) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !width || !height) return;
-    if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
-  }, []);
-
-  const clearOverlay = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-  }, []);
-
-  const revokePhoto = useCallback(() => {
-    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
-    photoUrlRef.current = '';
-  }, []);
-
-  const stopCamera = useCallback(() => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }, []);
+  useEffect(() => {
+    redraw();
+  }, [redraw]);
 
   useEffect(() => {
     let active = true;
-    productRef.current = product;
+    if (customGarment) return undefined;
 
-    if (landmarksRef.current && canvasRef.current) {
-      drawTryOn(canvasRef.current, landmarksRef.current, product);
+    if (!product.tryOnAsset) {
+      garmentRef.current = null;
+      setGarmentBounds(null);
+      setGarmentReady(false);
+      setMessage(personReady ? 'Upload this product as a transparent front PNG/WebP to fit the exact garment.' : 'Upload a full-body photo to begin.');
+      redraw();
+      return undefined;
     }
 
-    preloadGarmentTexture(product).then(() => {
-      if (active && landmarksRef.current && canvasRef.current) {
-        drawTryOn(canvasRef.current, landmarksRef.current, productRef.current);
-      }
-    });
-
-    return () => { active = false; };
-  }, [product]);
-
-  useEffect(() => {
-    let active = true;
     (async () => {
       try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        const pose = await createLandmarker(vision);
-        if (!active) {
-          pose.close();
-          return;
-        }
-        poseRef.current = pose;
-        setReady(true);
-        updateStatus('Ready — stand full body in frame');
+        const image = await loadImage(product.tryOnAsset, true);
+        if (!active) return;
+        garmentRef.current = image;
+        setGarmentBounds(detectVisibleBounds(image));
+        setGarmentReady(true);
+        setMessage(personReady ? 'Exact garment loaded. Calibrate your body points.' : 'Exact garment loaded. Upload your full-body photo.');
       } catch (error) {
         console.error(error);
-        updateStatus('Body tracking could not load');
+        if (active) setMessage('Could not load the garment asset. Upload a transparent garment image instead.');
       }
     })();
 
-    return () => {
-      active = false;
-      stopCamera();
-      revokePhoto();
-      poseRef.current?.close();
-    };
-  }, [revokePhoto, stopCamera, updateStatus]);
+    return () => { active = false; };
+  }, [customGarment, personReady, product, redraw]);
 
-  const drawVideo = useCallback(() => {
-    if (modeRef.current !== 'camera') return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const pose = poseRef.current;
-    if (!video || !canvas || !pose) return;
+  useEffect(() => () => {
+    if (personObjectUrlRef.current) URL.revokeObjectURL(personObjectUrlRef.current);
+    if (garmentObjectUrlRef.current) URL.revokeObjectURL(garmentObjectUrlRef.current);
+  }, []);
 
-    const now = performance.now();
-    if (
-      video.readyState >= 2 &&
-      video.videoWidth &&
-      video.currentTime !== lastVideoTimeRef.current &&
-      now - lastDetectRef.current > 38
-    ) {
-      sizeCanvas(video.videoWidth, video.videoHeight);
-      lastVideoTimeRef.current = video.currentTime;
-      lastDetectRef.current = now;
-
-      try {
-        const result = pose.detectForVideo(video, now);
-        const landmarks = result.landmarks?.[0];
-        if (landmarks) {
-          landmarksRef.current = landmarks;
-          drawTryOn(canvas, landmarks, productRef.current);
-          const upperVisible = [11, 12, 23, 24].every((index) => (landmarks[index]?.visibility ?? 1) > .5);
-          const legsVisible = [25, 26, 27, 28].every((index) => (landmarks[index]?.visibility ?? 1) > .35);
-          updateStatus(
-            upperVisible && legsVisible
-              ? `${productRef.current.type} fitted — photographic fabric active`
-              : 'Step back until shoulders, hips and feet are visible',
-          );
-        } else {
-          clearOverlay();
-          updateStatus('Stand facing the camera to start fitting');
-        }
-      } catch (error) {
-        console.error(error);
-      }
-    }
-
-    rafRef.current = requestAnimationFrame(drawVideo);
-  }, [clearOverlay, sizeCanvas, updateStatus]);
-
-  const startCamera = useCallback(async () => {
-    if (!ready || !poseRef.current) return;
-    stopCamera();
-    revokePhoto();
-    setPhoto('');
-    setCameraError('');
-    updateStatus('Opening camera…');
-
+  const handlePerson = async (file) => {
+    if (!file) return;
+    if (personObjectUrlRef.current) URL.revokeObjectURL(personObjectUrlRef.current);
+    const url = URL.createObjectURL(file);
+    personObjectUrlRef.current = url;
     try {
-      await poseRef.current.setOptions({ runningMode: 'VIDEO' });
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'user',
-          width: { ideal: 1280 },
-          height: { ideal: 960 },
-        },
-        audio: false,
-      });
-      streamRef.current = stream;
-      const video = videoRef.current;
-      video.srcObject = stream;
-      setMode('camera');
-      await video.play();
-      lastVideoTimeRef.current = -1;
-      lastDetectRef.current = 0;
-      drawVideo();
+      const image = await loadImage(url);
+      personRef.current = image;
+      setPersonReady(true);
+      setAnchors({});
+      setStep(0);
+      setCalibrating(false);
+      setMessage(garmentRef.current ? 'Photo ready. Start body calibration.' : 'Photo ready. Upload the exact garment cutout.');
+      requestAnimationFrame(redraw);
     } catch (error) {
       console.error(error);
-      setMode('idle');
-      setCameraError('Camera access was blocked. Upload a full-body photo instead.');
-      updateStatus('Camera unavailable');
+      setMessage('Could not open that photo.');
     }
-  }, [drawVideo, ready, revokePhoto, setMode, stopCamera, updateStatus]);
+  };
 
-  const usePhoto = useCallback((file) => {
-    if (!file || !poseRef.current) return;
-    stopCamera();
-    clearOverlay();
-    revokePhoto();
-    const next = URL.createObjectURL(file);
-    photoUrlRef.current = next;
-    setPhoto(next);
-    setMode('photo');
-    updateStatus(`Fitting ${productRef.current.type.toLowerCase()} to your photo…`);
-  }, [clearOverlay, revokePhoto, setMode, stopCamera, updateStatus]);
-
-  const detectPhoto = useCallback(async () => {
-    const image = imageRef.current;
-    const canvas = canvasRef.current;
-    const pose = poseRef.current;
-    if (!image || !canvas || !pose || !image.naturalWidth) return;
-
+  const handleGarment = async (file) => {
+    if (!file) return;
+    if (garmentObjectUrlRef.current) URL.revokeObjectURL(garmentObjectUrlRef.current);
+    const url = URL.createObjectURL(file);
+    garmentObjectUrlRef.current = url;
     try {
-      await preloadGarmentTexture(productRef.current);
-      await pose.setOptions({ runningMode: 'IMAGE' });
-      sizeCanvas(image.naturalWidth, image.naturalHeight);
-      const result = pose.detect(image);
-      const landmarks = result.landmarks?.[0];
-      if (landmarks) {
-        landmarksRef.current = landmarks;
-        drawTryOn(canvas, landmarks, productRef.current);
-        updateStatus(`${productRef.current.type} fitted — switch products below`);
-      } else {
-        clearOverlay();
-        updateStatus('Use a photo showing one full person from shoulders to feet');
-      }
+      const image = await loadImage(url);
+      garmentRef.current = image;
+      setGarmentBounds(detectVisibleBounds(image));
+      setGarmentReady(true);
+      setCustomGarment(true);
+      setMessage(personRef.current ? 'Exact garment loaded. Start calibration.' : 'Exact garment loaded. Upload your full-body photo.');
+      requestAnimationFrame(redraw);
     } catch (error) {
       console.error(error);
-      updateStatus('Could not process this photo');
+      setMessage('Could not open that garment image. Use a transparent PNG/WebP if possible.');
     }
-  }, [clearOverlay, sizeCanvas, updateStatus]);
+  };
 
-  const close = useCallback(() => {
-    stopCamera();
-    clearOverlay();
-    landmarksRef.current = null;
-    setMode('idle');
-    updateStatus('Ready — stand full body in frame');
-  }, [clearOverlay, setMode, stopCamera, updateStatus]);
+  const startCalibration = () => {
+    if (!personReady || !garmentReady) {
+      setMessage('Add both your full-body photo and exact garment asset first.');
+      return;
+    }
+    setAnchors({});
+    setStep(0);
+    setCalibrating(true);
+    setMessage(`Click: ${CALIBRATION_STEPS[0].label}`);
+  };
 
-  return <div className="tryon-stage">
-    <div className="tryon-media-wrap">
-      <video ref={videoRef} className={`tryon-media mirrored ${mode === 'camera' ? '' : 'media-hidden'}`} playsInline muted/>
-      {mode === 'photo' && photo && <img ref={imageRef} className="tryon-media" src={photo} alt="Your virtual try-on" onLoad={detectPhoto}/>} 
-      <canvas ref={canvasRef} className={`tryon-overlay ${mode === 'camera' ? 'mirrored' : ''}`}/>
+  const handleCanvasClick = (event) => {
+    if (!calibrating || !canvasRef.current || !personRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    const current = CALIBRATION_STEPS[step];
+    const nextAnchors = { ...anchors, [current.key]: { x, y } };
+    setAnchors(nextAnchors);
 
-      {mode === 'camera' && <div className="fit-guide" aria-hidden="true"><span/><b>Keep your full body inside the guide</b></div>}
+    const nextStep = step + 1;
+    if (nextStep >= CALIBRATION_STEPS.length) {
+      setStep(nextStep);
+      setCalibrating(false);
+      setMessage('Fitting complete. The displayed garment uses the exact SKU pixels you supplied.');
+    } else {
+      setStep(nextStep);
+      setMessage(`Click: ${CALIBRATION_STEPS[nextStep].label}`);
+    }
+  };
 
-      {mode === 'idle' && <div className="tryon-empty">
-        <div className="tryon-orbit"><ScanLine size={34}/></div>
-        <span className="eyebrow">ONLINE MAGIC MIRROR</span>
-        <h2>Try the real style <em>on you.</em></h2>
-        <p>Choose a saree, one-piece, gown or kurti. Your camera tracks your body and fits that garment type using real photographic textile detail.</p>
-        <div className="tryon-start-actions">
-          <button className="btn dark" disabled={!ready} onClick={startCamera}>
-            {!ready ? <LoaderCircle className="spin" size={16}/> : <Camera size={16}/>} {ready ? 'Start live try-on' : 'Loading try-on'}
-          </button>
-          <label className={`btn outline ${!ready ? 'disabled' : ''}`}><ImagePlus size={16}/> Upload full-body photo<input type="file" accept="image/*" disabled={!ready} onChange={(event) => usePhoto(event.target.files?.[0])}/></label>
-        </div>
-        {cameraError && <small className="camera-error">{cameraError}</small>}
-        <div className="privacy"><ShieldCheck size={14}/><span>Camera frames stay inside your browser for this prototype.</span></div>
+  const clear = () => {
+    setAnchors({});
+    setStep(0);
+    setCalibrating(false);
+    setMessage(personReady && garmentReady ? 'Ready to calibrate again.' : 'Upload a full-body photo to begin.');
+  };
+
+  return <div className="nonai-stage">
+    <div className="nonai-canvas-wrap">
+      <canvas ref={canvasRef} onClick={handleCanvasClick} className={calibrating ? 'is-calibrating' : ''}/>
+
+      {!personReady && <div className="nonai-empty">
+        <div className="nonai-icon"><Shirt size={34}/></div>
+        <span className="eyebrow">NON-AI VIRTUAL FITTING</span>
+        <h2>Your photo.<br/><em>The exact garment.</em></h2>
+        <p>No generated person and no synthetic clothing. Upload a real full-body photo, then fit the actual transparent garment asset from your catalog.</p>
+        <label className="btn dark"><ImagePlus size={16}/> Upload your photo<input type="file" accept="image/*" onChange={(event) => handlePerson(event.target.files?.[0])}/></label>
       </div>}
 
-      {mode !== 'idle' && <>
-        <div className="tracking-status"><i/><span>{status}</span></div>
-        <div className="stage-actions">
-          <button onClick={close}><X size={16}/> Close</button>
-          {mode === 'photo' && <label><RefreshCcw size={15}/> Change photo<input type="file" accept="image/*" onChange={(event) => usePhoto(event.target.files?.[0])}/></label>}
-        </div>
-      </>}
+      {personReady && <div className="nonai-toolbar">
+        <label><ImagePlus size={15}/> Change photo<input type="file" accept="image/*" onChange={(event) => handlePerson(event.target.files?.[0])}/></label>
+        <label><Upload size={15}/> Exact garment PNG<input type="file" accept="image/png,image/webp,image/*" onChange={(event) => handleGarment(event.target.files?.[0])}/></label>
+        <button onClick={startCalibration}><RefreshCcw size={15}/> Calibrate fit</button>
+        <button onClick={clear}><X size={15}/> Reset</button>
+      </div>}
+
+      {personReady && <div className={`nonai-status ${calibrating ? 'active' : ''}`}>
+        {calibrating ? <span>{step + 1}/{CALIBRATION_STEPS.length}</span> : <Check size={14}/>}<b>{message}</b>
+      </div>}
+    </div>
+
+    <div className="nonai-explainer">
+      <b>Exact-pixel fitting</b>
+      <span>Use a transparent front-facing garment asset. Prints, logos, embroidery, necklines and sleeve shape come from that real asset.</span>
     </div>
   </div>;
 }
