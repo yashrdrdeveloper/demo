@@ -6,6 +6,7 @@ import './styles.css';
 import './tryon.css';
 import './tryon-fixes.css';
 import './magic-mirror.css';
+import './real-garments.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
