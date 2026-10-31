@@ -181,16 +181,20 @@ export function analyzePose(landmarks, personRegion = null) {
   const centerX = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : .5;
   const shoulderY = (shoulders[0].y + shoulders[1].y) / 2;
   const hipY = hips.every(Boolean) ? (hips[0].y + hips[1].y) / 2 : shoulderY + .28;
-  const kneeY = [landmarks[25], landmarks[26]].filter(Boolean).reduce((sum, item) => sum + item.y, 0) / Math.max(1, [landmarks[25], landmarks[26]].filter(Boolean).length) || hipY + .22;
-  const ankleY = [landmarks[27], landmarks[28]].filter(Boolean).reduce((sum, item) => sum + item.y, 0) / Math.max(1, [landmarks[27], landmarks[28]].filter(Boolean).length) || kneeY + .22;
+  const kneeCandidates = [landmarks[25], landmarks[26]].filter(Boolean);
+  const ankleCandidates = [landmarks[27], landmarks[28]].filter(Boolean);
+  const kneeY = kneeCandidates.length ? kneeCandidates.reduce((sum, item) => sum + item.y, 0) / kneeCandidates.length : hipY + .22;
+  const ankleY = ankleCandidates.length ? ankleCandidates.reduce((sum, item) => sum + item.y, 0) / ankleCandidates.length : kneeY + .22;
 
   const faceScore = averageVisibility(landmarks, [0,1,2,3,4,5,6,7,8]);
   const shoulderDepth = Math.abs((shoulders[0]?.z || 0) - (shoulders[1]?.z || 0));
   const hipDepth = hips.every(Boolean) ? Math.abs((hips[0]?.z || 0) - (hips[1]?.z || 0)) : 0;
   const turnDepth = Math.max(shoulderDepth, hipDepth);
+  const shoulderOrder = shoulders[0].x - shoulders[1].x;
   let orientation = 'front';
-  if (faceScore < .20 && averageVisibility(landmarks, [11,12,23,24]) > .42) orientation = 'back';
-  else if (turnDepth > .18 || Math.abs((shoulders[0]?.visibility || 0) - (shoulders[1]?.visibility || 0)) > .36) orientation = 'side';
+  if (Math.abs(shoulderOrder) < .045 || turnDepth > .18) orientation = 'side';
+  else if (shoulderOrder < 0 && faceScore < .58) orientation = 'back';
+  else if (faceScore < .18 && averageVisibility(landmarks, [11,12,23,24]) > .42) orientation = 'back';
 
   const landmarkBottom = deepestVisibleLandmark(landmarks);
   const visibleBottom = clamp(personRegion?.bottom ?? landmarkBottom, shoulderY + .08, 1);
@@ -340,7 +344,7 @@ function frontPallu(shoulderL, waistR, hipL, shoulderSpan, hipSpan, bottomY) {
 
 function backPallu(shoulderR, waistL, hipR, shoulderSpan, hipSpan, bottomY) {
   const outer = {
-    x: Math.min(ctxWidthSafe(shoulderR.x + shoulderSpan * .58), shoulderR.x + shoulderSpan * .58),
+    x: shoulderR.x + shoulderSpan * .58,
     y: Math.min(bottomY, hipR.y + hipSpan * 1.18),
   };
   return [
@@ -350,10 +354,6 @@ function backPallu(shoulderR, waistL, hipR, shoulderSpan, hipSpan, bottomY) {
     outer,
     { x: hipR.x + hipSpan * .18, y: Math.min(bottomY, hipR.y + hipSpan * .16) },
   ];
-}
-
-function ctxWidthSafe(value) {
-  return Math.max(0, value);
 }
 
 export function drawSareeTryOn({ canvas, source, landmarks, fabric, product, size = 'M', viewState = null, skinMask = null, drawSource = false }) {
@@ -454,6 +454,7 @@ export function drawSareeTryOn({ canvas, source, landmarks, fabric, product, siz
     pallu = frontPallu(shoulderL, waistR, hipL, shoulderSpan, hipSpan, bottomY);
   }
 
+  pallu = pallu.map((item) => ({ x: clamp(item.x, 0, width), y: clamp(item.y, 0, bottomY) }));
   fillFabric(ctx, pallu, fabricPattern, fallback, orientation === 'side' ? .90 : .94);
   strokePath(ctx, pallu.slice(2), accent, Math.max(4, hipSpan * .05));
   ctx.restore();
