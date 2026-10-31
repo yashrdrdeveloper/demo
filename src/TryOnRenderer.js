@@ -1,3 +1,5 @@
+const textureCache = new Map();
+
 const point = (landmark, width, height) => ({
   x: landmark.x * width,
   y: landmark.y * height,
@@ -5,6 +7,49 @@ const point = (landmark, width, height) => ({
 });
 
 const safeAverage = (a, b) => (a + b) / 2;
+
+function getTextureEntry(product) {
+  if (!product?.textureUrl) return null;
+  let entry = textureCache.get(product.textureUrl);
+  if (entry) return entry;
+
+  const image = new Image();
+  image.crossOrigin = 'anonymous';
+  entry = { image, ready: false, failed: false, tile: null, promise: null };
+  entry.promise = new Promise((resolve) => {
+    image.onload = () => {
+      entry.ready = true;
+      entry.tile = buildTextureTile(image, product.textureCrop);
+      resolve(entry);
+    };
+    image.onerror = () => {
+      entry.failed = true;
+      resolve(entry);
+    };
+  });
+  image.src = product.textureUrl;
+  textureCache.set(product.textureUrl, entry);
+  return entry;
+}
+
+function buildTextureTile(image, crop) {
+  const c = crop || { x: 0, y: 0, w: 1, h: 1 };
+  const sx = Math.max(0, Math.min(image.naturalWidth - 1, image.naturalWidth * c.x));
+  const sy = Math.max(0, Math.min(image.naturalHeight - 1, image.naturalHeight * c.y));
+  const sw = Math.max(8, Math.min(image.naturalWidth - sx, image.naturalWidth * c.w));
+  const sh = Math.max(8, Math.min(image.naturalHeight - sy, image.naturalHeight * c.h));
+  const tile = document.createElement('canvas');
+  tile.width = 420;
+  tile.height = 420;
+  const tctx = tile.getContext('2d');
+  tctx.drawImage(image, sx, sy, sw, sh, 0, 0, tile.width, tile.height);
+  return tile;
+}
+
+export function preloadGarmentTexture(product) {
+  const entry = getTextureEntry(product);
+  return entry?.promise || Promise.resolve(null);
+}
 
 function bodyGeometry(landmarks, width, height) {
   const shoulders = [point(landmarks[11], width, height), point(landmarks[12], width, height)].sort((a, b) => a.x - b.x);
@@ -24,52 +69,51 @@ function bodyGeometry(landmarks, width, height) {
   const torso = Math.max(hipY - shoulderY, shoulderWidth * .9);
   const waistY = hipY - torso * .34;
 
-  return {
-    leftShoulder,
-    rightShoulder,
-    leftHip,
-    rightHip,
-    shoulderWidth,
-    hipWidth,
-    centerX,
-    shoulderY,
-    waistY,
-    hipY,
-    kneeY,
-    ankleY,
-    torso,
-  };
+  return { leftShoulder, rightShoulder, leftHip, rightHip, shoulderWidth, hipWidth, centerX, shoulderY, waistY, hipY, kneeY, ankleY, torso };
 }
 
 function clothGradient(ctx, product, x1, y1, x2, y2) {
   const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
-  gradient.addColorStop(0, '#00000026');
-  gradient.addColorStop(.14, product.color);
-  gradient.addColorStop(.31, '#ffffff22');
-  gradient.addColorStop(.48, product.color);
-  gradient.addColorStop(.67, '#00000018');
-  gradient.addColorStop(.84, '#ffffff1c');
+  gradient.addColorStop(0, '#0000001f');
+  gradient.addColorStop(.13, product.color);
+  gradient.addColorStop(.32, '#ffffff20');
+  gradient.addColorStop(.5, product.color);
+  gradient.addColorStop(.68, '#00000018');
+  gradient.addColorStop(.86, '#ffffff1d');
   gradient.addColorStop(1, product.color);
   return gradient;
+}
+
+function applyPhotographicTexture(ctx, product, geometry) {
+  const entry = getTextureEntry(product);
+  if (!entry?.ready || !entry.tile) return;
+  const pattern = ctx.createPattern(entry.tile, 'repeat');
+  if (!pattern) return;
+
+  const scale = Math.max(.28, geometry.shoulderWidth / 300);
+  if (pattern.setTransform && typeof DOMMatrix !== 'undefined') {
+    pattern.setTransform(new DOMMatrix().scale(scale, scale).translate(-geometry.centerX / scale, -geometry.shoulderY / scale));
+  }
+
+  ctx.save();
+  ctx.globalAlpha = product.textureOpacity ?? .68;
+  ctx.globalCompositeOperation = product.textureBlend || 'multiply';
+  ctx.fillStyle = pattern;
+  ctx.fill();
+  ctx.restore();
 }
 
 function fillCloth(ctx, product, geometry, pathFn, shadow = true) {
   ctx.save();
   pathFn();
   if (shadow) {
-    ctx.shadowColor = 'rgba(22,13,10,.28)';
+    ctx.shadowColor = 'rgba(22,13,10,.26)';
     ctx.shadowBlur = Math.max(geometry.shoulderWidth * .07, 7);
     ctx.shadowOffsetY = geometry.shoulderWidth * .035;
   }
-  ctx.fillStyle = clothGradient(
-    ctx,
-    product,
-    geometry.centerX - geometry.shoulderWidth,
-    geometry.shoulderY,
-    geometry.centerX + geometry.shoulderWidth,
-    geometry.ankleY,
-  );
+  ctx.fillStyle = clothGradient(ctx, product, geometry.centerX - geometry.shoulderWidth, geometry.shoulderY, geometry.centerX + geometry.shoulderWidth, geometry.ankleY);
   ctx.fill();
+  applyPhotographicTexture(ctx, product, geometry);
   ctx.restore();
 }
 
@@ -77,15 +121,7 @@ function eraseNeck(ctx, g, scaleX = .18, scaleY = .14) {
   ctx.save();
   ctx.globalCompositeOperation = 'destination-out';
   ctx.beginPath();
-  ctx.ellipse(
-    g.centerX,
-    g.shoulderY + g.shoulderWidth * .015,
-    g.shoulderWidth * scaleX,
-    g.shoulderWidth * scaleY,
-    0,
-    0,
-    Math.PI * 2,
-  );
+  ctx.ellipse(g.centerX, g.shoulderY + g.shoulderWidth * .015, g.shoulderWidth * scaleX, g.shoulderWidth * scaleY, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -116,7 +152,8 @@ function drawSleeves(ctx, landmarks, width, height, g, product, length = 'elbow'
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.lineWidth = Math.max(g.shoulderWidth * .22, 16);
-  ctx.strokeStyle = product.color;
+  const texture = getTextureEntry(product);
+  ctx.strokeStyle = texture?.ready && texture.tile ? (ctx.createPattern(texture.tile, 'repeat') || product.color) : product.color;
   ctx.shadowColor = 'rgba(20,12,10,.2)';
   ctx.shadowBlur = g.shoulderWidth * .045;
 
@@ -124,12 +161,7 @@ function drawSleeves(ctx, landmarks, width, height, g, product, length = 'elbow'
     const shoulder = point(landmarks[s], width, height);
     const elbow = point(landmarks[e], width, height);
     const wrist = point(landmarks[w], width, height);
-    const target = length === 'wrist'
-      ? wrist
-      : {
-          x: shoulder.x + (elbow.x - shoulder.x) * factor,
-          y: shoulder.y + (elbow.y - shoulder.y) * factor,
-        };
+    const target = length === 'wrist' ? wrist : { x: shoulder.x + (elbow.x - shoulder.x) * factor, y: shoulder.y + (elbow.y - shoulder.y) * factor };
     ctx.beginPath();
     ctx.moveTo(shoulder.x, shoulder.y + g.shoulderWidth * .04);
     ctx.lineTo(target.x, target.y);
@@ -140,7 +172,7 @@ function drawSleeves(ctx, landmarks, width, height, g, product, length = 'elbow'
 
 function drawFabricFolds(ctx, g, startY, bottomY, spread, count = 7) {
   ctx.save();
-  ctx.globalAlpha = .16;
+  ctx.globalAlpha = .2;
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = Math.max(1.2, g.shoulderWidth * .006);
   const half = Math.floor(count / 2);
@@ -148,12 +180,7 @@ function drawFabricFolds(ctx, g, startY, bottomY, spread, count = 7) {
     const ratio = half ? i / half : 0;
     ctx.beginPath();
     ctx.moveTo(g.centerX + ratio * g.shoulderWidth * .22, startY);
-    ctx.quadraticCurveTo(
-      g.centerX + ratio * spread * .24,
-      (startY + bottomY) / 2,
-      g.centerX + ratio * spread * .46,
-      bottomY - g.shoulderWidth * .06,
-    );
+    ctx.quadraticCurveTo(g.centerX + ratio * spread * .24, (startY + bottomY) / 2, g.centerX + ratio * spread * .46, bottomY - g.shoulderWidth * .06);
     ctx.stroke();
   }
   ctx.restore();
@@ -162,7 +189,7 @@ function drawFabricFolds(ctx, g, startY, bottomY, spread, count = 7) {
 function drawBorder(ctx, product, g, y, width, lineWidth = .02) {
   ctx.save();
   ctx.strokeStyle = product.accent || '#d6b477';
-  ctx.globalAlpha = .88;
+  ctx.globalAlpha = .9;
   ctx.lineWidth = Math.max(3, g.shoulderWidth * lineWidth);
   ctx.beginPath();
   ctx.moveTo(g.centerX - width / 2, y);
@@ -223,7 +250,6 @@ function drawSaree(ctx, landmarks, width, height, g, product) {
   const wrapWidth = Math.max(g.hipWidth * 1.05, g.shoulderWidth * .82);
   const bottomWidth = g.shoulderWidth * 1.08;
 
-  // Blouse.
   fillCloth(ctx, product, g, () => {
     ctx.beginPath();
     ctx.moveTo(g.leftShoulder.x - g.shoulderWidth * .08, g.leftShoulder.y + g.shoulderWidth * .04);
@@ -236,7 +262,6 @@ function drawSaree(ctx, landmarks, width, height, g, product) {
   drawSleeves(ctx, landmarks, width, height, g, product, 'short');
   eraseNeck(ctx, g, .18, .135);
 
-  // Wrapped saree lower body.
   fillCloth(ctx, product, g, () => {
     ctx.beginPath();
     ctx.moveTo(g.centerX - wrapWidth * .5, skirtTop);
@@ -246,7 +271,6 @@ function drawSaree(ctx, landmarks, width, height, g, product) {
     ctx.closePath();
   });
 
-  // Front pleats.
   ctx.save();
   ctx.globalAlpha = .22;
   ctx.strokeStyle = '#fff';
@@ -254,17 +278,11 @@ function drawSaree(ctx, landmarks, width, height, g, product) {
   [-.14, -.07, 0, .07, .14].forEach((ratio) => {
     ctx.beginPath();
     ctx.moveTo(g.centerX + ratio * g.shoulderWidth, skirtTop + g.shoulderWidth * .03);
-    ctx.quadraticCurveTo(
-      g.centerX + ratio * g.shoulderWidth * .7,
-      (skirtTop + g.ankleY) / 2,
-      g.centerX + ratio * g.shoulderWidth * 1.3,
-      g.ankleY - g.shoulderWidth * .08,
-    );
+    ctx.quadraticCurveTo(g.centerX + ratio * g.shoulderWidth * .7, (skirtTop + g.ankleY) / 2, g.centerX + ratio * g.shoulderWidth * 1.3, g.ankleY - g.shoulderWidth * .08);
     ctx.stroke();
   });
   ctx.restore();
 
-  // Pallu: shoulder -> opposite waist -> free drape.
   const palluShoulder = g.rightShoulder;
   const oppositeWaistX = g.centerX - g.shoulderWidth * .42;
   const freeEdgeX = g.centerX + g.shoulderWidth * .86;
@@ -279,7 +297,6 @@ function drawSaree(ctx, landmarks, width, height, g, product) {
     ctx.closePath();
   }, false);
 
-  // Saree borders.
   drawBorder(ctx, product, g, g.ankleY - g.shoulderWidth * .07, bottomWidth * .88, .026);
   ctx.save();
   ctx.strokeStyle = product.accent || '#d6b477';
@@ -297,17 +314,15 @@ export function drawTryOn(canvas, landmarks, product) {
   const ctx = canvas.getContext('2d');
   const { width, height } = canvas;
   ctx.clearRect(0, 0, width, height);
-
   if ([11, 12, 23, 24].some((index) => (landmarks[index]?.visibility ?? 1) < .35)) return;
 
+  getTextureEntry(product);
   const g = bodyGeometry(landmarks, width, height);
   const type = product.garmentType || 'onepiece';
-
   if (type === 'saree') drawSaree(ctx, landmarks, width, height, g, product);
   else if (type === 'gown') drawOnePiece(ctx, landmarks, width, height, g, product, true);
   else if (type === 'kurti') drawKurti(ctx, landmarks, width, height, g, product);
   else drawOnePiece(ctx, landmarks, width, height, g, product, false);
 
-  // Keep the customer's real arms visually in front of the virtual cloth.
   revealRealArms(ctx, landmarks, width, height, g);
 }
