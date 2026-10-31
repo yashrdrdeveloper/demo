@@ -11,8 +11,4 @@ import './nonai-tryon.css';
 import './live-size-fixes.css';
 import './auto-saree.css';
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
