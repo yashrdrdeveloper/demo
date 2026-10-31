@@ -1,69 +1,71 @@
-# Maison Aara — Online Magic Mirror Prototype
+# Maison Aara — Non-AI Online Trial Room
 
-A React + Vite fashion boutique prototype that brings an in-store virtual fitting mirror to the web.
+React + Vite prototype for a deterministic online garment fitting room.
 
-## What is included
+## Core idea
 
-- Premium boutique storefront with real garment photography
-- Saree, one-piece dress, gown and kurti product categories
-- Virtual Try-On entry point from every product
-- Live browser camera support
-- Full-body photo upload fallback
-- MediaPipe Pose Landmarker body tracking
-- Garment placement using the customer's real shoulders, waist, hips, knees and ankles
-- Garment-specific renderers instead of one generic dress overlay
-  - Saree: blouse + wrapped lower saree + front pleats + shoulder pallu
-  - One-piece: continuous fitted bodice and skirt
-  - Gown: floor-length flared dress
-  - Kurti: straight below-knee silhouette
-- Photographic fabric textures clipped into the live garment geometry
-- Real-time garment movement as the customer changes pose
-- Foreground arm occlusion so the customer's arms stay visually in front of the garment
-- Instant product switching while the camera stays open
-- Full-body alignment guide
-- Responsive desktop and mobile fitting-room layouts
-- Cart and size-selection interactions
+This version intentionally uses **no AI**:
 
-## Run locally
+- no generative try-on model
+- no pose/body ML model
+- no generated avatar
+- no synthetic garment rendering
+
+Instead, the customer uploads a real full-body photo and the catalog provides the **exact front-facing transparent garment asset**. The customer calibrates body points once, then the app warps those real garment pixels to shoulders, waist, hips and hem.
+
+## Included
+
+- Premium boutique storefront
+- Exact T-shirt demo using a transparent real garment PNG
+- Boutique examples for saree, one-piece, gown and kurti
+- Customer full-body photo upload
+- Exact garment PNG/WebP upload
+- Eight-point manual body calibration
+  - left/right shoulder
+  - left/right waist
+  - left/right hip
+  - left/right hem
+- Multi-band image mesh warping
+- Exact logo / print / embroidery pixels preserved from the garment asset
+- Customer measurement inputs
+- Deterministic size recommendation from garment size-chart measurements
+- Responsive fitting-room UI
+
+## Why manual calibration?
+
+Automatically understanding body shape from a normal photo requires computer-vision/ML techniques. Since this project is explicitly non-AI, calibration is manual and deterministic.
+
+## Catalog asset requirements
+
+For the best result, every production SKU should include:
+
+1. normal ecommerce product photo
+2. transparent front-facing PNG/WebP of the actual garment
+3. product type (`top` or `full`)
+4. size-chart garment measurements
+
+A T-shirt asset should contain the exact T-shirt shape, sleeves, neck, logo and print. The renderer deforms those pixels rather than drawing a replacement shirt.
+
+## Fit accuracy
+
+The visual result is a deterministic 2D fit preview. It is useful for appearance and proportion, but it is **not cloth simulation** and cannot predict real fabric tension, folds or stretch from a single photo.
+
+For physically accurate fit without AI, the next step is a true 3D apparel pipeline: calibrated body measurements + a 3D garment pattern/mesh + cloth simulation (for example assets authored in CLO/Marvelous Designer/Blender and rendered with WebGL).
+
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-Camera access works on `localhost` during development. A deployed version must be served over HTTPS for browser camera permissions.
-
-## Production build
+## Build
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## Architecture
-
-The prototype uses `@mediapipe/tasks-vision` Pose Landmarker in the browser. It detects body landmarks from live camera frames or an uploaded photo, then selects a garment-specific renderer for the active product.
-
-The renderer combines tracked garment geometry with photographic textile imagery, so the cloth surface uses real image pixels instead of a flat synthetic fill. There is no generated mannequin/avatar in the try-on flow.
-
-## Production upgrade path
-
-For your real boutique catalog, each SKU should provide:
-
-- front garment photo or transparent PNG/WebP
-- close-up fabric/embroidery texture
-- garment type (`saree`, `onepiece`, `gown`, `kurti`)
-- optional anchor/fit metadata
-
-The current browser renderer is suitable for an interactive prototype. For true photorealistic cloth deformation, folds, self-occlusion and body-shape transfer, connect the same fitting-room UI to a dedicated virtual try-on model/service and use the actual SKU garment image as its clothing input.
-
 ## Demo asset attribution
 
-The repository uses external demo references only to demonstrate realistic garment photography and textile rendering. Replace these URLs with your own product assets for production.
-
-- `Silk saree 2.jpg` — Seratobikiba, Wikimedia Commons, CC BY-SA 4.0
-- `Indian traditional lady wearing saree.jpg` — Swapppp57, Wikimedia Commons, CC BY-SA 4.0
-- `Red-Dress.jpg` — Vanessa Teves, Wikimedia Commons, CC0
-- `Gfp-red-fabric-texture.jpg` — Yinan Chen / Good Free Photos, public domain dedication
-- `Red dress, Jewels exhibition, Hermitage Amsterdam.jpg` — Wikimedia Commons, CC0/PD artwork photograph metadata on source page
-- `Indian woman wearing a kurti.jpg` — NabeelJV, Wikimedia Commons, CC BY-SA 4.0
+The included exact T-shirt demo uses `Wikipedia 25 Tshirt white (front).png` from Wikimedia Commons, licensed CC BY-SA 4.0.
