@@ -37,6 +37,7 @@ export default function VirtualTryOnStage({ product }) {
   const rafRef = useRef(null);
   const landmarksRef = useRef(null);
   const productRef = useRef(product);
+  const photoUrlRef = useRef('');
   const lastVideoTimeRef = useRef(-1);
   const lastDetectRef = useRef(0);
   const modeRef = useRef('idle');
@@ -69,6 +70,11 @@ export default function VirtualTryOnStage({ product }) {
   const clearOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  }, []);
+
+  const revokePhoto = useCallback(() => {
+    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+    photoUrlRef.current = '';
   }, []);
 
   const stopCamera = useCallback(() => {
@@ -108,10 +114,10 @@ export default function VirtualTryOnStage({ product }) {
     return () => {
       active = false;
       stopCamera();
+      revokePhoto();
       poseRef.current?.close();
-      if (photo) URL.revokeObjectURL(photo);
     };
-  }, [photo, stopCamera, updateStatus]);
+  }, [revokePhoto, stopCamera, updateStatus]);
 
   const drawVideo = useCallback(() => {
     if (modeRef.current !== 'camera') return;
@@ -159,11 +165,9 @@ export default function VirtualTryOnStage({ product }) {
   const startCamera = useCallback(async () => {
     if (!ready || !poseRef.current) return;
     stopCamera();
+    revokePhoto();
+    setPhoto('');
     setCameraError('');
-    setPhoto((old) => {
-      if (old) URL.revokeObjectURL(old);
-      return '';
-    });
     updateStatus('Opening camera…');
 
     try {
@@ -190,20 +194,19 @@ export default function VirtualTryOnStage({ product }) {
       setCameraError('Camera access was blocked. Upload a full-body photo instead.');
       updateStatus('Camera unavailable');
     }
-  }, [drawVideo, ready, setMode, stopCamera, updateStatus]);
+  }, [drawVideo, ready, revokePhoto, setMode, stopCamera, updateStatus]);
 
   const usePhoto = useCallback((file) => {
     if (!file || !poseRef.current) return;
     stopCamera();
     clearOverlay();
+    revokePhoto();
     const next = URL.createObjectURL(file);
-    setPhoto((old) => {
-      if (old) URL.revokeObjectURL(old);
-      return next;
-    });
+    photoUrlRef.current = next;
+    setPhoto(next);
     setMode('photo');
     updateStatus(`Fitting ${productRef.current.type.toLowerCase()} to your photo…`);
-  }, [clearOverlay, setMode, stopCamera, updateStatus]);
+  }, [clearOverlay, revokePhoto, setMode, stopCamera, updateStatus]);
 
   const detectPhoto = useCallback(async () => {
     const image = imageRef.current;
