@@ -5,9 +5,9 @@ import GarmentArt from './GarmentArt';
 import VirtualTryOnStage from './VirtualTryOnStage';
 import { PRODUCTS, money } from './data';
 
-export default function Studio({ goHome, addToBag, initialProduct }) {
+export default function Studio({ goHome, addToBag, initialProduct, initialSize = 'M' }) {
   const [product, setProduct] = useState(initialProduct || PRODUCTS[0]);
-  const [size, setSize] = useState('M');
+  const [size, setSize] = useState(initialSize);
 
   return <main className="virtual-room nonai-room">
     <div className="virtual-topbar">
@@ -37,7 +37,7 @@ export default function Studio({ goHome, addToBag, initialProduct }) {
         <div className="virtual-size size-only-box">
           <div><b>Your size</b><span>Choose the size you normally buy</span></div>
           <div>{['XS', 'S', 'M', 'L', 'XL'].map((item) => <button key={item} className={size === item ? 'active' : ''} onClick={() => setSize(item)}>{item}</button>)}</div>
-          <p className="size-fit-note"><Check size={14}/><span>The live garment layer updates immediately for <b>{size}</b>. No body measurements are requested.</span></p>
+          <p className="size-fit-note"><Check size={14}/><span>The garment layer updates immediately for <b>{size}</b>. No body measurements are requested.</span></p>
         </div>
 
         <button className="btn dark full" onClick={addToBag}>Add size {size} to bag <ShoppingBag size={15}/></button>
