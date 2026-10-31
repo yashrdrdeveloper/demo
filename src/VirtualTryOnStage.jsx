@@ -2,8 +2,9 @@ import { Camera, Check, ImagePlus, LoaderCircle, RefreshCcw, Shirt, Upload, Vide
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
-  CALIBRATION_STEPS,
+  PHOTO_CALIBRATION_STEPS,
   detectVisibleBounds,
+  getLiveCalibrationSteps,
   renderGarmentOverlay,
   renderTryOn,
 } from './TryOnRenderer';
@@ -30,10 +31,7 @@ function loadOpenCv() {
       try {
         let cv = window.cv;
         if (cv && typeof cv.then === 'function') cv = await cv;
-        if (cv?.Mat) {
-          resolve(cv);
-          return;
-        }
+        if (cv?.Mat) return resolve(cv);
         if (cv) {
           cv.onRuntimeInitialized = () => resolve(cv);
           return;
@@ -63,16 +61,152 @@ function loadOpenCv() {
   return openCvPromise;
 }
 
-function anchorsToPointArray(anchors, width, height) {
-  const values = [];
-  CALIBRATION_STEPS.forEach(({ key }) => {
-    const anchor = anchors[key];
-    values.push(anchor.x * width, anchor.y * height);
-  });
-  return values;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-export default function VirtualTryOnStage({ product }) {
+function estimateSimilarity(previous, current) {
+  if (previous.length < 3 || current.length !== previous.length) return null;
+  const prevCenter = previous.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+  const nextCenter = current.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+  prevCenter.x /= previous.length;
+  prevCenter.y /= previous.length;
+  nextCenter.x /= current.length;
+  nextCenter.y /= current.length;
+
+  let dot = 0;
+  let cross = 0;
+  let denom = 0;
+  previous.forEach((p, index) => {
+    const q = current[index];
+    const px = p.x - prevCenter.x;
+    const py = p.y - prevCenter.y;
+    const qx = q.x - nextCenter.x;
+    const qy = q.y - nextCenter.y;
+    dot += px * qx + py * qy;
+    cross += px * qy - py * qx;
+    denom += px * px + py * py;
+  });
+  if (denom < 1) return null;
+
+  let a = dot / denom;
+  let b = cross / denom;
+  const scale = Math.hypot(a, b);
+  const angle = Math.atan2(b, a);
+
+  // Optical flow can occasionally produce a wild transform. Prefer a stable mirror over a jump.
+  if (!Number.isFinite(scale) || scale < 0.94 || scale > 1.06 || Math.abs(angle) > 0.14) {
+    a = 1;
+    b = 0;
+  }
+
+  return {
+    a,
+    b,
+    tx: nextCenter.x - a * prevCenter.x + b * prevCenter.y,
+    ty: nextCenter.y - b * prevCenter.x - a * prevCenter.y,
+  };
+}
+
+function transformAnchor(anchor, transform, width, height) {
+  const x = anchor.x * width;
+  const y = anchor.y * height;
+  return {
+    x: clamp((transform.a * x - transform.b * y + transform.tx) / width, 0.01, 0.99),
+    y: clamp((transform.b * x + transform.a * y + transform.ty) / height, 0.01, 0.99),
+  };
+}
+
+function torsoRect(anchors, width, height) {
+  const keys = ['leftShoulder', 'rightShoulder', 'leftHip', 'rightHip'];
+  if (keys.some((key) => !anchors[key])) return null;
+  const xs = keys.map((key) => anchors[key].x * width);
+  const ys = keys.map((key) => anchors[key].y * height);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const bodyW = Math.max(40, maxX - minX);
+  const bodyH = Math.max(60, maxY - minY);
+  const x = clamp(Math.floor(minX - bodyW * 0.28), 0, width - 2);
+  const y = clamp(Math.floor(minY - bodyH * 0.18), 0, height - 2);
+  const right = clamp(Math.ceil(maxX + bodyW * 0.28), x + 2, width);
+  const bottom = clamp(Math.ceil(maxY + bodyH * 0.28), y + 2, height);
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+function fallbackPoints(anchors, width, height) {
+  const shoulderL = anchors.leftShoulder;
+  const shoulderR = anchors.rightShoulder;
+  const hipL = anchors.leftHip;
+  const hipR = anchors.rightHip;
+  const points = [shoulderL, shoulderR, hipL, hipR];
+  if (shoulderL && shoulderR && hipL && hipR) {
+    points.push(
+      { x: (shoulderL.x + shoulderR.x) / 2, y: (shoulderL.y + shoulderR.y) / 2 },
+      { x: (hipL.x + hipR.x) / 2, y: (hipL.y + hipR.y) / 2 },
+      { x: shoulderL.x * 0.42 + hipL.x * 0.58, y: shoulderL.y * 0.42 + hipL.y * 0.58 },
+      { x: shoulderR.x * 0.42 + hipR.x * 0.58, y: shoulderR.y * 0.42 + hipR.y * 0.58 },
+    );
+  }
+  return points.filter(Boolean).flatMap((p) => [p.x * width, p.y * height]);
+}
+
+function seedFeatures(cv, gray, anchors, width, height) {
+  const rect = torsoRect(anchors, width, height);
+  if (!rect || rect.width < 20 || rect.height < 20) {
+    return cv.matFromArray(4, 1, cv.CV_32FC2, fallbackPoints(anchors, width, height).slice(0, 8));
+  }
+
+  const roi = gray.roi(new cv.Rect(rect.x, rect.y, rect.width, rect.height));
+  const corners = new cv.Mat();
+  const mask = new cv.Mat();
+  let points = [];
+  try {
+    cv.goodFeaturesToTrack(roi, corners, 90, 0.012, 7, mask, 7, false, 0.04);
+    for (let i = 0; i < corners.rows; i += 1) {
+      points.push(corners.data32F[i * 2] + rect.x, corners.data32F[i * 2 + 1] + rect.y);
+    }
+  } catch (error) {
+    console.warn('Feature detection fallback:', error);
+  } finally {
+    roi.delete();
+    corners.delete();
+    mask.delete();
+  }
+
+  if (points.length < 12) points = fallbackPoints(anchors, width, height);
+  const count = Math.max(1, Math.floor(points.length / 2));
+  return cv.matFromArray(count, 1, cv.CV_32FC2, points);
+}
+
+function mediaPointFromClick(event, canvas, video, mode) {
+  const rect = canvas.getBoundingClientRect();
+  if (mode !== 'live' || !video?.videoWidth || !video?.videoHeight) {
+    return {
+      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+      y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+    };
+  }
+
+  const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const displayWidth = video.videoWidth * scale;
+  const displayHeight = video.videoHeight * scale;
+  const offsetX = (rect.width - displayWidth) / 2;
+  const offsetY = (rect.height - displayHeight) / 2;
+  const visualX = clamp((event.clientX - rect.left - offsetX) / displayWidth, 0, 1);
+  const visualY = clamp((event.clientY - rect.top - offsetY) / displayHeight, 0, 1);
+
+  // The mirror is visually flipped with CSS; OpenCV receives the original camera frame.
+  return { x: 1 - visualX, y: visualY };
+}
+
+export default function VirtualTryOnStage({ product, size = 'M' }) {
   const canvasRef = useRef(null);
   const videoRef = useRef(null);
   const personRef = useRef(null);
@@ -85,11 +219,11 @@ export default function VirtualTryOnStage({ product }) {
   const modeRef = useRef('idle');
   const garmentBoundsRef = useRef(null);
   const garmentTypeRef = useRef(product.garmentType);
+  const sizeRef = useRef(size);
 
   const [mode, setMode] = useState('idle');
   const [personReady, setPersonReady] = useState(false);
   const [garmentReady, setGarmentReady] = useState(false);
-  const [garmentBounds, setGarmentBounds] = useState(null);
   const [anchors, setAnchors] = useState({});
   const [step, setStep] = useState(0);
   const [calibrating, setCalibrating] = useState(false);
@@ -97,6 +231,10 @@ export default function VirtualTryOnStage({ product }) {
   const [trackerLoading, setTrackerLoading] = useState(false);
   const [message, setMessage] = useState('Choose live mirror or upload a photo.');
   const [customGarment, setCustomGarment] = useState(false);
+
+  const liveSteps = getLiveCalibrationSteps(product.garmentType);
+  const photoSteps = PHOTO_CALIBRATION_STEPS;
+  const activeSteps = mode === 'live' ? liveSteps : photoSteps;
 
   const setModeSafe = useCallback((next) => {
     modeRef.current = next;
@@ -130,10 +268,12 @@ export default function VirtualTryOnStage({ product }) {
       bounds: garmentBoundsRef.current,
       anchors: nextAnchors,
       garmentType: garmentTypeRef.current,
+      size: sizeRef.current,
       width: video.videoWidth,
       height: video.videoHeight,
       showCalibration,
       activeStep,
+      calibrationSteps: getLiveCalibrationSteps(garmentTypeRef.current),
     });
   }, [calibrating, step]);
 
@@ -146,6 +286,7 @@ export default function VirtualTryOnStage({ product }) {
       bounds: garmentBoundsRef.current,
       anchors: anchorsRef.current,
       garmentType: garmentTypeRef.current,
+      size: sizeRef.current,
       showCalibration: calibrating,
       activeStep: step,
     });
@@ -162,6 +303,11 @@ export default function VirtualTryOnStage({ product }) {
   }, [anchors, redraw]);
 
   useEffect(() => {
+    sizeRef.current = size;
+    redraw();
+  }, [size, redraw]);
+
+  useEffect(() => {
     garmentTypeRef.current = product.garmentType;
     redraw();
   }, [product.garmentType, redraw]);
@@ -173,7 +319,6 @@ export default function VirtualTryOnStage({ product }) {
     if (!product.tryOnAsset) {
       garmentRef.current = null;
       garmentBoundsRef.current = null;
-      setGarmentBounds(null);
       setGarmentReady(false);
       setMessage('Upload the exact transparent front garment PNG/WebP for this product.');
       redraw();
@@ -187,9 +332,8 @@ export default function VirtualTryOnStage({ product }) {
         const bounds = detectVisibleBounds(image);
         garmentRef.current = image;
         garmentBoundsRef.current = bounds;
-        setGarmentBounds(bounds);
         setGarmentReady(true);
-        setMessage(modeRef.current === 'live' ? 'Garment ready. Calibrate once on the live mirror.' : 'Exact garment ready. Choose live mirror or photo fitting.');
+        setMessage(modeRef.current === 'live' ? 'Garment ready. Calibrate the torso once.' : 'Exact garment ready. Choose live mirror or photo fitting.');
         redraw();
       } catch (error) {
         console.error(error);
@@ -221,49 +365,76 @@ export default function VirtualTryOnStage({ product }) {
     try {
       cap.read(frame);
       cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
-      const winSize = new cv.Size(31, 31);
+      const winSize = new cv.Size(29, 29);
       const criteria = new cv.TermCriteria(cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 24, 0.02);
       cv.calcOpticalFlowPyrLK(tracker.prevGray, gray, tracker.prevPts, nextPts, status, err, winSize, 3, criteria);
 
-      const previous = anchorsRef.current;
-      const nextAnchors = {};
-      let valid = 0;
+      const previousPoints = [];
+      const currentPoints = [];
+      const dx = [];
+      const dy = [];
+      for (let i = 0; i < tracker.prevPts.rows; i += 1) {
+        if (status.data[i] !== 1) continue;
+        const px = tracker.prevPts.data32F[i * 2];
+        const py = tracker.prevPts.data32F[i * 2 + 1];
+        const nx = nextPts.data32F[i * 2];
+        const ny = nextPts.data32F[i * 2 + 1];
+        if (![px, py, nx, ny].every(Number.isFinite)) continue;
+        previousPoints.push({ x: px, y: py });
+        currentPoints.push({ x: nx, y: ny });
+        dx.push(nx - px);
+        dy.push(ny - py);
+      }
 
-      CALIBRATION_STEPS.forEach(({ key }, index) => {
-        const ok = status.data[index] === 1;
-        const px = nextPts.data32F[index * 2];
-        const py = nextPts.data32F[index * 2 + 1];
-        if (ok && Number.isFinite(px) && Number.isFinite(py) && px >= 0 && py >= 0 && px <= video.videoWidth && py <= video.videoHeight) {
-          const prior = previous[key];
-          const measured = { x: px / video.videoWidth, y: py / video.videoHeight };
-          nextAnchors[key] = prior
-            ? { x: prior.x * 0.28 + measured.x * 0.72, y: prior.y * 0.28 + measured.y * 0.72 }
-            : measured;
-          valid += 1;
-        } else if (previous[key]) {
-          nextAnchors[key] = previous[key];
+      if (previousPoints.length < 6) throw new Error('Too few tracked visual features');
+
+      const medianDx = median(dx);
+      const medianDy = median(dy);
+      const maxDeviation = Math.max(14, Math.min(video.videoWidth, video.videoHeight) * 0.035);
+      const filteredPrev = [];
+      const filteredNext = [];
+      currentPoints.forEach((point, index) => {
+        const flowX = point.x - previousPoints[index].x;
+        const flowY = point.y - previousPoints[index].y;
+        if (Math.hypot(flowX - medianDx, flowY - medianDy) <= maxDeviation) {
+          filteredPrev.push(previousPoints[index]);
+          filteredNext.push(point);
         }
       });
 
-      if (valid < CALIBRATION_STEPS.length - 1) {
-        cleanupTracker();
-        setMessage('Tracking lost. Stand still and calibrate the body points again.');
-        setCalibrating(false);
-        renderCurrentOverlay(nextAnchors, false, 0);
-        return;
-      }
+      const transform = estimateSimilarity(filteredPrev, filteredNext);
+      if (!transform || filteredPrev.length < 5) throw new Error('Unstable torso transform');
+
+      const previousAnchors = anchorsRef.current;
+      const nextAnchors = {};
+      Object.entries(previousAnchors).forEach(([key, anchor]) => {
+        const transformed = transformAnchor(anchor, transform, video.videoWidth, video.videoHeight);
+        nextAnchors[key] = {
+          x: anchor.x * 0.38 + transformed.x * 0.62,
+          y: anchor.y * 0.38 + transformed.y * 0.62,
+        };
+      });
 
       anchorsRef.current = nextAnchors;
       renderCurrentOverlay(nextAnchors, false, 0);
+      tracker.frameCount += 1;
 
       tracker.prevGray.delete();
       tracker.prevPts.delete();
       tracker.prevGray = gray.clone();
-      tracker.prevPts = nextPts.clone();
+
+      if (tracker.frameCount % 18 === 0 || filteredNext.length < 16) {
+        tracker.prevPts = seedFeatures(cv, gray, nextAnchors, video.videoWidth, video.videoHeight);
+      } else {
+        const packed = filteredNext.flatMap((point) => [point.x, point.y]);
+        tracker.prevPts = cv.matFromArray(filteredNext.length, 1, cv.CV_32FC2, packed);
+      }
     } catch (error) {
       console.error(error);
       cleanupTracker();
-      setMessage('Live tracker stopped. Recalibrate to continue.');
+      setMessage('Tracking paused. Face the camera and tap Recalibrate.');
+      setCalibrating(false);
+      renderCurrentOverlay(anchorsRef.current, false, 0);
     } finally {
       frame.delete();
       gray.delete();
@@ -280,7 +451,7 @@ export default function VirtualTryOnStage({ product }) {
     if (!video?.videoWidth) return;
     cleanupTracker();
     setTrackerLoading(true);
-    setMessage('Starting classic optical-flow tracking…');
+    setMessage('Locking the garment to your torso…');
 
     try {
       const cv = await loadOpenCv();
@@ -290,14 +461,15 @@ export default function VirtualTryOnStage({ product }) {
       const gray = new cv.Mat();
       cap.read(frame);
       cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
-      const points = anchorsToPointArray(nextAnchors, video.videoWidth, video.videoHeight);
-      const pts = cv.matFromArray(CALIBRATION_STEPS.length, 1, cv.CV_32FC2, points);
+      const pts = seedFeatures(cv, gray, nextAnchors, video.videoWidth, video.videoHeight);
+      if (pts.rows < 4) throw new Error('Not enough torso texture to track');
 
       trackerRef.current = {
         cv,
         cap,
         prevGray: gray.clone(),
         prevPts: pts.clone(),
+        frameCount: 0,
         raf: null,
       };
 
@@ -305,11 +477,11 @@ export default function VirtualTryOnStage({ product }) {
       gray.delete();
       pts.delete();
       setTracking(true);
-      setMessage('Live tracking active — move naturally.');
+      setMessage('Live fit locked — move naturally.');
       trackerRef.current.raf = requestAnimationFrame(trackFrame);
     } catch (error) {
       console.error(error);
-      setMessage('OpenCV tracker could not start. You can still use photo fitting.');
+      setMessage('Live tracker could not lock. Use good lighting and recalibrate your torso.');
     } finally {
       setTrackerLoading(false);
     }
@@ -337,7 +509,8 @@ export default function VirtualTryOnStage({ product }) {
       setAnchors({});
       setStep(0);
       setCalibrating(true);
-      setMessage(`Click once on the live mirror: ${CALIBRATION_STEPS[0].label}`);
+      const steps = getLiveCalibrationSteps(garmentTypeRef.current);
+      setMessage(`Tap ${steps[0].label.toLowerCase()} on the mirror`);
       requestAnimationFrame(() => renderCurrentOverlay({}, true, 0));
     } catch (error) {
       console.error(error);
@@ -378,10 +551,10 @@ export default function VirtualTryOnStage({ product }) {
       const bounds = detectVisibleBounds(image);
       garmentRef.current = image;
       garmentBoundsRef.current = bounds;
-      setGarmentBounds(bounds);
       setGarmentReady(true);
       setCustomGarment(true);
-      setMessage(modeRef.current === 'live' ? 'Garment loaded. Recalibrate the live mirror.' : 'Exact garment loaded. Choose live mirror or upload your photo.');
+      cleanupTracker();
+      setMessage(modeRef.current === 'live' ? 'Garment loaded. Tap Recalibrate to lock it to your torso.' : 'Exact garment loaded. Choose live mirror or upload your photo.');
       redraw();
     } catch (error) {
       console.error(error);
@@ -399,34 +572,35 @@ export default function VirtualTryOnStage({ product }) {
     setAnchors({});
     setStep(0);
     setCalibrating(true);
-    setMessage(`Click: ${CALIBRATION_STEPS[0].label}`);
+    const steps = modeRef.current === 'live' ? getLiveCalibrationSteps(garmentTypeRef.current) : PHOTO_CALIBRATION_STEPS;
+    setMessage(`Tap ${steps[0].label.toLowerCase()}`);
     if (modeRef.current === 'live') renderCurrentOverlay({}, true, 0);
   };
 
   const handleCanvasClick = (event) => {
     if (!calibrating || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const visualX = (event.clientX - rect.left) / rect.width;
-    const y = (event.clientY - rect.top) / rect.height;
-    const x = modeRef.current === 'live' ? 1 - visualX : visualX;
-    const current = CALIBRATION_STEPS[step];
-    const nextAnchors = { ...anchorsRef.current, [current.key]: { x, y } };
+    const steps = modeRef.current === 'live' ? getLiveCalibrationSteps(garmentTypeRef.current) : PHOTO_CALIBRATION_STEPS;
+    const point = mediaPointFromClick(event, canvasRef.current, videoRef.current, modeRef.current);
+    const current = steps[step];
+    if (!current) return;
+
+    const nextAnchors = { ...anchorsRef.current, [current.key]: point };
     anchorsRef.current = nextAnchors;
     setAnchors(nextAnchors);
 
     const nextStep = step + 1;
-    if (nextStep >= CALIBRATION_STEPS.length) {
+    if (nextStep >= steps.length) {
       setStep(nextStep);
       setCalibrating(false);
       if (modeRef.current === 'live') {
         renderCurrentOverlay(nextAnchors, false, 0);
         startTracking(nextAnchors);
       } else {
-        setMessage('Photo fitting complete. The exact SKU pixels are warped to your calibration.');
+        setMessage('Photo fitting complete. Change size to compare the exact garment fit.');
       }
     } else {
       setStep(nextStep);
-      setMessage(`Click: ${CALIBRATION_STEPS[nextStep].label}`);
+      setMessage(`Tap ${steps[nextStep].label.toLowerCase()}`);
       if (modeRef.current === 'live') renderCurrentOverlay(nextAnchors, true, nextStep);
     }
   };
@@ -437,7 +611,7 @@ export default function VirtualTryOnStage({ product }) {
     setAnchors({});
     setStep(0);
     setCalibrating(false);
-    setMessage(modeRef.current === 'live' ? 'Ready to calibrate the live mirror again.' : 'Ready to calibrate again.');
+    setMessage(modeRef.current === 'live' ? 'Tap Recalibrate to lock the garment again.' : 'Ready to calibrate again.');
     redraw();
   };
 
@@ -463,9 +637,9 @@ export default function VirtualTryOnStage({ product }) {
 
       {mode === 'idle' && <div className="nonai-empty">
         <div className="nonai-icon"><Shirt size={34}/></div>
-        <span className="eyebrow">NON-AI LIVE FITTING</span>
+        <span className="eyebrow">LIVE VIRTUAL TRIAL ROOM</span>
         <h2>Your body.<br/><em>The exact garment.</em></h2>
-        <p>Use the live camera and calibrate eight points once. Classic optical flow then follows those points frame-by-frame and continuously warps the exact garment asset as you move.</p>
+        <p>Choose your size, open the camera and tap four torso points once. The app tracks many visual features around your torso so the complete garment moves as one stable layer.</p>
         <div className="nonai-start-actions">
           <button className="btn dark" disabled={!garmentReady} onClick={startLive}><Camera size={16}/> Start live mirror</button>
           <label className="btn outline"><ImagePlus size={16}/> Fit on photo<input type="file" accept="image/*" onChange={(event) => handlePerson(event.target.files?.[0])}/></label>
@@ -482,13 +656,13 @@ export default function VirtualTryOnStage({ product }) {
       </div>}
 
       {mode !== 'idle' && <div className={`nonai-status ${calibrating ? 'active' : ''}`}>
-        {trackerLoading ? <LoaderCircle className="spin" size={14}/> : calibrating ? <span>{step + 1}/{CALIBRATION_STEPS.length}</span> : tracking ? <span className="tracking-dot"/> : <Check size={14}/>}<b>{message}</b>
+        {trackerLoading ? <LoaderCircle className="spin" size={14}/> : calibrating ? <span>{step + 1}/{activeSteps.length}</span> : tracking ? <span className="tracking-dot"/> : <Check size={14}/>}<b>{message}</b>
       </div>}
     </div>
 
     <div className="nonai-explainer">
-      <b>{mode === 'live' ? 'Classic CV tracking' : 'Exact-pixel fitting'}</b>
-      <span>{mode === 'live' ? 'Manual anchors are tracked frame-to-frame with optical flow. No generative model and no pose model.' : 'Prints, logos, embroidery, neckline and sleeve shape come from the real transparent SKU asset.'}</span>
+      <b>{mode === 'live' ? 'Stable live layer' : 'Exact-pixel fitting'}</b>
+      <span>{mode === 'live' ? 'The whole garment follows a torso transform estimated from many optical-flow features, reducing point drift.' : 'Prints, logos, embroidery, neckline and sleeve shape come from the real transparent SKU asset.'}</span>
     </div>
   </div>;
 }
